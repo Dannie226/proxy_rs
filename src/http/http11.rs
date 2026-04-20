@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
-    fmt,
-    io::{self, BufRead, BufReader, Cursor, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     num::NonZeroUsize,
 };
 
@@ -60,8 +59,8 @@ fn get_body_reader<'a>(
     headers: &HeaderMap,
 ) -> anyhow::Result<Body<'a>> {
     if headers
-        .get("transfer-encoding")
-        .filter(|v| v.iter().any(|s| s == "chunked"))
+        .get(b"transfer-encoding".as_slice())
+        .filter(|v| v.iter().any(|s| s == b"chunked"))
         .is_some()
     {
         let mut line = String::new();
@@ -86,8 +85,9 @@ fn get_body_reader<'a>(
     }
 
     let len = headers
-        .get("content-length")
+        .get(b"content-length".as_slice())
         .map(|v| &*v[0])
+        .and_then(|v| str::from_utf8(v).ok())
         .unwrap_or("0")
         .parse()
         .context("Failed to parse content length")?;
@@ -131,31 +131,35 @@ pub fn parse_request(stream: &TlsStream) -> anyhow::Result<Request<'_>> {
     let major = major.parse().context("Failed to parse major version")?;
     let minor = minor.parse().context("Failed to parse minor version")?;
 
-    let mut headers = HashMap::new();
+    let mut headers = HeaderMap::new();
 
+    let mut line = Vec::new();
     loop {
         line.clear();
 
         reader
-            .read_line(&mut line)
+            .read_until(b'\n', &mut line)
             .context("Failed to read header line")?;
 
         let line = line
-            .strip_suffix("\n")
+            .strip_suffix(b"\n")
             .unwrap_or(&*line)
-            .strip_suffix("\r")
+            .strip_suffix(b"\r")
             .unwrap_or(&*line);
 
         if line.is_empty() {
             break;
         }
 
-        let (header_name, header_value) = line
-            .split_once(":")
-            .ok_or_else(|| anyhow!("Failed to find header name end delimiter"))?;
+        let colon_index = line
+            .iter()
+            .position(|&v| v == b':')
+            .ok_or_else(|| anyhow!("Failed to find \":\" in header"))?;
 
-        let header_name = header_name.to_lowercase();
-        let header_value = header_value.trim_start().to_string();
+        let (header_name, header_value) = line.split_at(colon_index);
+
+        let header_name = header_name.to_ascii_lowercase().into();
+        let header_value = header_value.trim_ascii_start().to_vec().into();
 
         headers
             .entry(header_name)
