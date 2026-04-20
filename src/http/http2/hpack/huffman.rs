@@ -1,5 +1,7 @@
 use std::io::{self, Read};
 
+use bstr::BString;
+
 static HUFFMAN_CODES: [u32; 257] = [
     0x1ff8, 0x7fffd8, 0xfffffe2, 0xfffffe3, 0xfffffe4, 0xfffffe5, 0xfffffe6, 0xfffffe7, 0xfffffe8,
     0xffffea, 0x3ffffffc, 0xfffffe9, 0xfffffea, 0x3ffffffd, 0xfffffeb, 0xfffffec, 0xfffffed,
@@ -614,44 +616,30 @@ pub fn encode_bytes(data: &[u8]) -> Vec<u8> {
     output
 }
 
-pub fn decode_bytes(length: usize, data: &[u8]) -> io::Result<Vec<u8>> {
-    let mut offset: u8 = 7;
-    let mut byte = data[0];
-    let mut data_index = 1;
+pub fn decode_bytes(data: &[u8]) -> io::Result<BString> {
     let mut index = 0;
+    let mut output = Vec::with_capacity(data.len());
 
-    let mut output = Vec::with_capacity(length * 2);
+    for &v in data {
+        for off in (0..8).rev() {
+            let bit = (v >> off) & 0x1;
 
-    loop {
-        let mut indices = TREE_LIST[index].get_indices();
-        if indices.0 == 0 {
-            if indices.1 as u16 == 256 {
-                break;
+            let indices = TREE_LIST[index].get_indices();
+
+            if bit == 0x1 {
+                index = indices.1;
+            } else {
+                index = indices.0;
             }
 
-            output.push(indices.1 as u8);
-            indices = TREE_LIST[0].get_indices();
-        }
+            let indices = TREE_LIST[index].get_indices();
 
-        let bit = (byte >> offset) & 0x1;
-        if offset == 0 {
-            if data_index == length {
-                break;
+            if indices.0 == 0 {
+                output.push(indices.1 as u8);
+                index = 0;
             }
-
-            byte = data[data_index];
-            data_index += 1;
-            offset = 7;
-        } else {
-            offset -= 1;
-        }
-
-        if bit == 0x1 {
-            index = indices.1
-        } else {
-            index = indices.0
         }
     }
 
-    Ok(output)
+    Ok(output.into())
 }
