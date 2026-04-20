@@ -1,6 +1,8 @@
 use std::{collections::HashMap, fmt::Debug, io::Read};
 
-pub type HeaderMap = HashMap<Vec<u8>, Vec<Vec<u8>>>;
+use bstr::BString;
+
+pub type HeaderMap = HashMap<BString, Vec<BString>>;
 
 pub struct Request<'a> {
     pub(crate) method: String,
