@@ -159,7 +159,7 @@ pub fn parse_request(stream: &TlsStream) -> anyhow::Result<Request<'_>> {
         let (header_name, header_value) = line.split_at(colon_index);
 
         let header_name = header_name.to_ascii_lowercase().into();
-        let header_value = header_value.trim_ascii_start().to_vec().into();
+        let header_value = header_value[1..].trim_ascii_start().to_vec().into();
 
         headers
             .entry(header_name)
