@@ -1,7 +1,10 @@
 use std::{
+    borrow::Cow,
     collections::{VecDeque, vec_deque::Iter},
     iter::repeat_n,
 };
+
+use bstr::{BStr, BString};
 
 pub struct StaticEntry {
     pub name: &'static [u8],
@@ -122,9 +125,11 @@ impl DynamicTable {
         self.buffer.extend((size as u64).to_le_bytes());
         self.buffer.extend((name.len() as u64).to_le_bytes());
         self.buffer.extend((value.len() as u64).to_le_bytes());
-        self.buffer.extend(repeat_n(0, 8));
         self.buffer.extend(name);
         self.buffer.extend(value);
+        // Size on both sides for double ended iteration
+        self.buffer.extend((size as u64).to_le_bytes());
+        self.num_elements += 1;
     }
 
     pub fn get(&self, index: usize) -> Option<(Iter<'_, u8>, Iter<'_, u8>)> {
@@ -132,16 +137,18 @@ impl DynamicTable {
             return None;
         }
 
-        let mut offset = 0;
+        let mut offset = self.buffer.len();
 
         for _ in 0..index {
-            offset += self.get_size(offset) as usize;
+            offset -= self.get_size(offset - 8) as usize;
         }
+
+        offset -= self.get_size(offset - 8) as usize;
 
         let name_size = self.get_size(offset + 8) as usize;
         let value_size = self.get_size(offset + 16) as usize;
 
-        offset += 32;
+        offset += 24;
 
         let name_iter = self.buffer.range(offset..offset + name_size);
         offset += name_size;
@@ -151,28 +158,32 @@ impl DynamicTable {
     }
 }
 
-struct HeaderTable(DynamicTable);
+pub struct HeaderTable(DynamicTable);
 
 impl HeaderTable {
     pub fn new(max_table_size: usize) -> HeaderTable {
         HeaderTable(DynamicTable::new(max_table_size))
     }
 
-    pub fn get(&self, index: usize, get_value: bool) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    pub fn get(
+        &self,
+        index: usize,
+        get_value: bool,
+    ) -> Option<(Cow<'static, BStr>, Option<BString>)> {
         if index == 0 {
             None
         } else if index <= 61 {
             Some((
-                STATIC_TABLE[index - 1].name.to_vec(),
+                Cow::Borrowed(STATIC_TABLE[index - 1].name.into()),
                 STATIC_TABLE[index - 1]
                     .value
                     .filter(|_| get_value)
-                    .map(ToOwned::to_owned),
+                    .map(Into::into),
             ))
         } else {
-            self.0.get(index - 61).map(|(n, v)| {
+            self.0.get(index - 62).map(|(n, v)| {
                 (
-                    n.copied().collect(),
+                    Cow::Owned(n.copied().collect()),
                     Some(v)
                         .filter(|_| get_value)
                         .map(Iterator::copied)
@@ -180,5 +191,13 @@ impl HeaderTable {
                 )
             })
         }
+    }
+
+    pub fn insert(&mut self, name: &[u8], value: &[u8]) {
+        self.0.insert(name, value)
+    }
+
+    pub fn dyn_size(&self) -> usize {
+        self.0.num_elements
     }
 }
