@@ -12,9 +12,7 @@ use anyhow::Context;
 
 use crate::ffi::{self, error::Error, ssl::*};
 
-static PROTOS: &[u8] = &[
-    2, b'h', b'2', 8, b'h', b't', b't', b'p', b'/', b'1', b'.', b'1',
-];
+static PROTOS: &[u8] = b"\x02h2\x08http/1.1";
 
 extern "C" fn select_alpn(
     _ssl: *mut SSL,
