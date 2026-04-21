@@ -1,12 +1,14 @@
 use std::{
-    borrow::Cow,
+    borrow::{Borrow, Cow},
     io::{self, Read, Write},
 };
+
+use bstr::{BStr, BString};
 
 use crate::{
     ffi::rand::fill_bytes,
     http::{
-        http2::hpack::{self, huffman, literal, tables::STATIC_TABLE},
+        http2::hpack::{self, huffman, literal},
         request::HeaderMap,
     },
 };
@@ -81,65 +83,68 @@ fn write_u64(writer: &mut impl Write, value: u64) -> io::Result<()> {
     writer.write_all(&v)
 }
 
-trait FrameParse: Sized {
-    fn read_frame(flags: u8, len: u32, reader: &mut impl Read) -> io::Result<Self>;
-}
-
-trait FrameWrite {
-    const TYPE_NUM: u8;
-    fn write_frame(&self, stream_id: u32, output: &mut impl Write) -> io::Result<()>;
-}
-
-fn write_header<T: FrameWrite>(
-    stream_id: u32,
-    data_len: u32,
-    flags: u8,
-    output: &mut impl Write,
-) -> io::Result<()> {
-    const fn mask(value: u32, byte: u8) -> u8 {
-        let m = 0xFFu32 << ((byte * 0x8) as u32);
-
-        ((value & m) >> ((byte * 0x8) as u32)) as u8
-    }
-
-    write_u24(output, data_len)?;
-    write_u8(output, T::TYPE_NUM)?;
-    write_u8(output, flags)?;
-    write_u32(output, stream_id)?;
+fn write_header(header: FrameHeader, output: &mut impl Write) -> io::Result<()> {
+    write_u24(output, header.frame_len)?;
+    write_u8(output, header.frame_type)?;
+    write_u8(output, header.flags)?;
+    write_u32(output, header.stream_id)?;
 
     Ok(())
 }
 
-#[derive(Debug)]
-pub struct DataFrame {
-    pub data: Vec<u8>,
-    pub last: bool,
+#[derive(Clone, Copy, Debug)]
+pub struct FrameHeader {
+    pub frame_len: u32,
+    pub frame_type: u8,
+    pub flags: u8,
+    pub stream_id: u32,
 }
 
-impl DataFrame {
-    const END_FLAG: u8 = 0x1;
-    const PAD_FLAG: u8 = 0x8;
+impl FrameHeader {
+    pub fn read_header(reader: &mut impl Read) -> io::Result<FrameHeader> {
+        let frame_len = read_u24(reader)?;
+        let frame_type = read_u8(reader)?;
+        let flags = read_u8(reader)?;
+        let stream_id = read_u32(reader)? & 0x7FFFFFFF;
+
+        Ok(FrameHeader {
+            frame_len,
+            frame_type,
+            flags,
+            stream_id,
+        })
+    }
 }
 
-impl FrameParse for DataFrame {
-    fn read_frame(flags: u8, len: u32, frame_data: &mut impl Read) -> io::Result<Self> {
-        if len == 0 {
-            return Ok(DataFrame {
-                data: Vec::new(),
-                last: flags & Self::END_FLAG == Self::END_FLAG,
-            });
+pub mod data {
+    use super::*;
+    use std::io::{self, Read};
+
+    pub const END_BIT: u8 = 0x1;
+    pub const PAD_BIT: u8 = 0x8;
+
+    pub const TYPE_NUM: u8 = 0x0;
+
+    fn read_frame(header: FrameHeader, frame_data: &mut impl Read) -> io::Result<(Vec<u8>, bool)> {
+        assert_eq!(header.frame_type, TYPE_NUM);
+        let FrameHeader {
+            frame_len,
+            frame_type: _,
+            flags,
+            stream_id: _,
+        } = header;
+
+        if frame_len == 0 {
+            return Ok((Vec::new(), flags & END_BIT == END_BIT));
         }
 
-        println!("{flags:b}");
-        let pad_bytes = if flags & Self::PAD_FLAG == Self::PAD_FLAG {
+        let pad_bytes = if flags & PAD_BIT == PAD_BIT {
             read_u8(frame_data)?
         } else {
             0
         } as u32;
 
-        println!("Data Len: {len}, padding bytes: {pad_bytes}");
-
-        let data_len = len - pad_bytes;
+        let data_len = frame_len - pad_bytes;
 
         // Safety: I am creating the vec with the capacity, and then setting it's length
         // These are also raw bytes, so nothing wrong there
@@ -151,57 +156,56 @@ impl FrameParse for DataFrame {
 
         frame_data.read_exact(&mut data)?;
 
-        Ok(DataFrame {
-            data,
-            last: flags & Self::END_FLAG == Self::END_FLAG,
-        })
+        Ok((data, flags & END_BIT == END_BIT))
+    }
+
+    pub fn write_frame(
+        stream_id: u32,
+        data: &[u8],
+        last: bool,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        write_header(
+            FrameHeader {
+                frame_len: data.len() as u32,
+                frame_type: TYPE_NUM,
+                flags: if last { END_BIT } else { 0x0 },
+                stream_id,
+            },
+            output,
+        )?;
+
+        output.write_all(data)
     }
 }
 
-static PAD_BUF: [u8; 256] = [0u8; 256];
+pub mod header {
+    use crate::http::http2::hpack::{literal::write_integer, tables::HeaderTable};
 
-impl FrameWrite for DataFrame {
-    const TYPE_NUM: u8 = 0x0;
+    use super::*;
+    use std::io::{self, Read};
 
-    fn write_frame(&self, stream_id: u32, output: &mut impl Write) -> io::Result<()> {
-        let mut pad_len = [0u8; 1];
-        fill_bytes(&mut pad_len).map_err(io::Error::other)?;
+    pub const END_STREAM_BIT: u8 = 0x01;
+    pub const END_HEAD_BIT: u8 = 0x04;
+    pub const PADDED_BIT: u8 = 0x08;
+    pub const PRIORITY_BIT: u8 = 0x20;
 
-        let pad_size = pad_len[0] as usize;
-        let frame_len = self.data.len() as u32 + pad_size as u32;
-        let flags = {
-            let mut f = 0;
+    pub const TYPE_NUM: u8 = 0x1;
 
-            if pad_size != 0 {
-                f |= Self::PAD_FLAG;
-            }
+    pub fn read_frame(
+        header: FrameHeader,
+        decode_table: &mut HeaderTable,
+        frame_data: &mut impl Read,
+    ) -> io::Result<HeaderMap> {
+        assert_eq!(header.frame_type, TYPE_NUM);
+        let FrameHeader {
+            frame_len,
+            flags,
+            frame_type: _,
+            stream_id: _,
+        } = header;
 
-            if self.last {
-                f |= Self::END_FLAG;
-            }
-
-            f
-        };
-
-        write_header::<Self>(stream_id, frame_len, flags, output)?;
-
-        output.write_all(&pad_len)?;
-        output.write_all(&self.data)?;
-
-        if pad_size != 0 {
-            output.write_all(&PAD_BUF[0..pad_size])?;
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct HeaderFrame(pub HeaderMap);
-
-impl FrameParse for HeaderFrame {
-    fn read_frame(flags: u8, len: u32, frame_data: &mut impl Read) -> io::Result<Self> {
-        fn insert_header<'a>(headers: &mut HeaderMap, name: Cow<'a, [u8]>, value: Vec<u8>) {
+        fn insert_header<'a>(headers: &mut HeaderMap, name: Cow<'a, BStr>, value: BString) {
             match headers.get_mut(&*name) {
                 Some(v) => {
                     v.push(value);
@@ -209,103 +213,172 @@ impl FrameParse for HeaderFrame {
                 None => {
                     let values = vec![value];
 
-                    headers.insert(name.into_owned(), values);
+                    headers.insert(name.into_owned().into(), values);
                 }
             }
         }
 
-        let mut v = vec![0u8; len as usize];
+        let mut v = vec![0u8; frame_len as usize];
 
         frame_data.read_exact(&mut v)?;
 
-        let mut offset = 4;
+        let mut offset = if flags & PRIORITY_BIT == PRIORITY_BIT {
+            5
+        } else {
+            0
+        };
+
+        println!("[");
+        for chunk in v[offset..].chunks(32) {
+            print!("  ");
+            for &v in chunk {
+                print!("0x{v:02X}, ");
+            }
+            println!()
+        }
+        println!("]");
         let mut headers = HeaderMap::new();
 
         while offset < v.len() {
             let first_byte = v[offset];
             if first_byte & 0x80 == 0x80 {
+                println!("Literal");
                 let (index, count) = literal::parse_integer(7, &v[offset..])?;
                 offset += count;
 
-                if index > 0 && index <= 61 {
-                    let index = (index - 1) as usize;
-                    let name = STATIC_TABLE[index].name;
-                    let Some(value) = STATIC_TABLE[index].value else {
-                        continue;
-                    };
+                let Some((name, Some(value))) = decode_table.get(index as usize, true) else {
+                    println!("Index: {index}, Size: {}", decode_table.dyn_size() + 61);
+                    return Err(io::Error::other(
+                        "Raw indexed header must have name and value",
+                    ));
+                };
 
-                    insert_header(&mut headers, Cow::Borrowed(name), value.to_vec());
+                if name.eq_ignore_ascii_case(b"accept-language") {
+                    println!("Got accept language\n--------------------------------------")
                 }
+
+                insert_header(&mut headers, name, value);
             } else if first_byte & 0x40 == 0x40 {
+                println!("Incremental");
                 let (index, count) = literal::parse_integer(6, &v[offset..])?;
                 offset += count;
 
-                let n: Cow<'static, _> = if index == 0 {
-                    let (name, count) = literal::parse_string(&v[offset..])?;
+                let n: Cow<'static, BStr> = if index == 0 {
+                    let (mut name, count) = literal::parse_string(&v[offset..])?;
                     offset += count;
+                    name.make_ascii_lowercase();
 
                     Cow::Owned(name)
-                } else if index <= 61 {
-                    Cow::Borrowed(STATIC_TABLE[index as usize - 1].name)
                 } else {
-                    continue;
+                    let Some((name, _)) = decode_table.get(index as usize, false) else {
+                        println!("Index: {index}");
+                        return Err(io::Error::other(
+                            "Incremental indexed header index must exist",
+                        ));
+                    };
+
+                    name
                 };
 
                 let (value, count) = literal::parse_string(&v[offset..])?;
                 offset += count;
 
-                insert_header(&mut headers, n, value);
+                decode_table.insert(&*n, &value);
+                insert_header(&mut headers, n, value.into());
             } else if first_byte & 0x20 == 0x20 {
                 let (new_size, count) = literal::parse_integer(5, &v[offset..])?;
                 offset += count;
             } else if first_byte & 0x10 == 0x10 {
+                println!("Without");
                 let (index, count) = literal::parse_integer(4, &v[offset..])?;
                 offset += count;
 
-                if index == 0 {
-                    let (name, count) = literal::parse_string(&v[offset..])?;
+                let n: Cow<'static, _> = if index == 0 {
+                    let (mut name, count) = literal::parse_string(&v[offset..])?;
                     offset += count;
-                }
+                    name.make_ascii_lowercase();
+
+                    Cow::Owned(name)
+                } else {
+                    let Some((name, _)) = decode_table.get(index as usize, false) else {
+                        println!("Index: {index}");
+                        return Err(io::Error::other("Without indexing header index must exist"));
+                    };
+
+                    name
+                };
 
                 let (value, count) = literal::parse_string(&v[offset..])?;
                 offset += count;
+
+                insert_header(&mut headers, n, value.into());
             } else {
+                println!("Never");
                 let (index, count) = literal::parse_integer(4, &v[offset..])?;
                 offset += count;
 
-                if index == 0 {
-                    let (name, count) = literal::parse_string(&v[offset..])?;
+                let n: Cow<'static, _> = if index == 0 {
+                    let (mut name, count) = literal::parse_string(&v[offset..])?;
                     offset += count;
-                }
+                    name.make_ascii_lowercase();
+
+                    Cow::Owned(name)
+                } else {
+                    let Some((name, _)) = decode_table.get(index as usize, false) else {
+                        println!("Index: {index}");
+                        return Err(io::Error::other("Never indexing header index must exist"));
+                    };
+
+                    name
+                };
 
                 let (value, count) = literal::parse_string(&v[offset..])?;
                 offset += count;
+
+                insert_header(&mut headers, n, value.into());
             }
         }
 
-        println!("{headers:?}");
+        Ok(headers)
+    }
 
-        Ok(HeaderFrame(headers))
+    pub fn write_ok(stream_id: u32, output: &mut impl Write) -> io::Result<()> {
+        write_header(
+            FrameHeader {
+                frame_len: 1,
+                frame_type: TYPE_NUM,
+                flags: END_HEAD_BIT,
+                stream_id,
+            },
+            output,
+        )?;
+        output.write_all(&[0x88])
     }
 }
 
-impl FrameWrite for HeaderFrame {
-    const TYPE_NUM: u8 = 0x1;
+pub mod priority {
+    use super::*;
+    use std::io::{self, Read};
 
-    fn write_frame(&self, stream_id: u32, output: &mut impl Write) -> io::Result<()> {
-        Err(io::Error::other("Not Implemented"))
+    #[derive(Clone, Copy, Debug)]
+    pub struct PriorityFrame {
+        exclusive: bool,
+        dependency: u32,
+        weight: u8,
     }
-}
 
-#[derive(Debug)]
-pub struct PriorityFrame {
-    exclusive: bool,
-    dependency: u32,
-    weight: u8,
-}
+    pub const TYPE_NUM: u8 = 0x2;
 
-impl FrameParse for PriorityFrame {
-    fn read_frame(flags: u8, len: u32, frame_data: &mut impl Read) -> io::Result<Self> {
+    pub fn read_frame(
+        header: FrameHeader,
+        frame_data: &mut impl Read,
+    ) -> io::Result<PriorityFrame> {
+        assert_eq!(header.frame_type, TYPE_NUM);
+        let FrameHeader { frame_len, .. } = header;
+
+        if frame_len != 5 {
+            return Err(io::Error::other("Priority frame must be length 5"));
+        }
         let id_ex = read_u32(frame_data)?;
         let weight = read_u8(frame_data)?;
         let id = id_ex & 0x7FFFFFFF;
@@ -317,360 +390,396 @@ impl FrameParse for PriorityFrame {
             weight,
         })
     }
-}
 
-impl FrameWrite for PriorityFrame {
-    const TYPE_NUM: u8 = 0x2;
-    fn write_frame(&self, stream_id: u32, output: &mut impl Write) -> io::Result<()> {
-        write_header::<Self>(stream_id, 5, 0, output)?;
-
-        let ex = if self.exclusive { 0x80000000u32 } else { 0x0 };
-        let id = self.dependency & 0x7FFFFFFF;
+    pub fn write_frame(
+        stream_id: u32,
+        data: PriorityFrame,
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        let ex = if data.exclusive { 0x80000000u32 } else { 0x0 };
+        let id = data.dependency & 0x7FFFFFFF;
 
         let id_ex = id | ex;
 
+        write_header(
+            FrameHeader {
+                frame_len: 5,
+                frame_type: TYPE_NUM,
+                flags: 0x0,
+                stream_id,
+            },
+            output,
+        )?;
         write_u32(output, id_ex)?;
-        write_u8(output, self.weight)?;
+        write_u8(output, data.weight)?;
 
         Ok(())
     }
 }
 
-#[derive(Debug)]
-pub struct RstStreamFrame {
-    error_code: u32,
-}
+pub mod rst_stream {
+    use super::*;
 
-impl FrameParse for RstStreamFrame {
-    fn read_frame(flags: u8, len: u32, reader: &mut impl Read) -> io::Result<Self> {
-        let error_code = read_u32(reader)?;
+    pub const TYPE_NUM: u8 = 0x3;
 
-        Ok(RstStreamFrame { error_code })
+    pub fn read_frame(header: FrameHeader, reader: &mut impl Read) -> io::Result<u32> {
+        assert_eq!(header.frame_type, TYPE_NUM);
+        if header.frame_len != 4 {
+            return Err(io::Error::other("Reset stream frame must have length 4"));
+        }
+
+        read_u32(reader)
     }
-}
 
-impl FrameWrite for RstStreamFrame {
-    const TYPE_NUM: u8 = 0x3;
-
-    fn write_frame(&self, stream_id: u32, output: &mut impl Write) -> io::Result<()> {
-        write_header::<Self>(stream_id, 4, 0, output);
-
-        write_u32(output, self.error_code)
-    }
-}
-
-#[derive(Debug)]
-pub struct HTTP2Settings {
-    pub header_table_size: u32,
-    pub enable_push: bool,
-    pub max_concurrent_streams: u32,
-    pub initial_window_size: u32,
-    pub max_frame_size: u32,
-    pub max_header_list_size: u32,
-}
-
-impl Default for HTTP2Settings {
-    fn default() -> Self {
-        HTTP2Settings {
-            header_table_size: 4096,
-            enable_push: true,
-            max_concurrent_streams: u32::MAX,
-            initial_window_size: u16::MAX as u32,
-            max_frame_size: 1 << 14,
-            max_header_list_size: u32::MAX,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum SettingsFrame {
-    Ack,
-    Settings(HTTP2Settings),
-}
-
-impl SettingsFrame {
-    const ACK_MASK: u8 = 0x1;
-}
-
-impl FrameParse for SettingsFrame {
-    fn read_frame(flags: u8, len: u32, reader: &mut impl Read) -> io::Result<Self> {
-        if flags & Self::ACK_MASK == Self::ACK_MASK {
-            if len == 0 {
-                return Ok(SettingsFrame::Ack);
-            } else {
-                return Err(io::Error::other("Len must be 0 for ack"));
-            }
-        }
-
-        let mut settings = HTTP2Settings::default();
-
-        let mut r = 0;
-
-        while r < len {
-            let setting = read_u16(reader)?;
-            let value = read_u32(reader)?;
-
-            match setting {
-                0x1 => settings.header_table_size = value,
-                0x2 if value == 0 || value == 1 => settings.enable_push = value == 1,
-                0x2 => return Err(io::Error::other("Enable value must be 0 or 1")),
-                0x3 => settings.max_concurrent_streams = value,
-                0x4 => settings.initial_window_size = value,
-                0x5 => settings.max_frame_size = value,
-                0x6 => settings.max_header_list_size = value,
-                _ => {}
-            }
-
-            r += 6;
-        }
-
-        Ok(SettingsFrame::Settings(settings))
-    }
-}
-
-impl FrameWrite for SettingsFrame {
-    const TYPE_NUM: u8 = 0x4;
-
-    fn write_frame(&self, stream_id: u32, output: &mut impl Write) -> io::Result<()> {
-        let data = match self {
-            SettingsFrame::Ack => {
-                write_header::<Self>(stream_id, 0, Self::ACK_MASK, output);
-                return Ok(());
-            }
-            SettingsFrame::Settings(s) => s,
-        };
-
-        let defaults = HTTP2Settings::default();
-
-        let mut buffer = [0u8; 36];
-        let mut len = 0;
-
-        if defaults.header_table_size != data.header_table_size {
-            buffer[len..len + 2].copy_from_slice(&(0x1u16.to_be_bytes()));
-            buffer[len + 2..len + 6].copy_from_slice(&(data.header_table_size.to_be_bytes()));
-            len += 6;
-        }
-
-        if defaults.enable_push != data.enable_push {
-            buffer[len..len + 2].copy_from_slice(&(0x2u16.to_be_bytes()));
-            buffer[len + 2..len + 6].copy_from_slice(&((data.enable_push as u32).to_be_bytes()));
-            len += 6;
-        }
-
-        if defaults.max_concurrent_streams != data.max_concurrent_streams {
-            buffer[len..len + 2].copy_from_slice(&(0x3u16.to_be_bytes()));
-            buffer[len + 2..len + 6].copy_from_slice(&(data.max_concurrent_streams.to_be_bytes()));
-            len += 6;
-        }
-
-        if defaults.initial_window_size != data.initial_window_size {
-            buffer[len..len + 2].copy_from_slice(&(0x4u16.to_be_bytes()));
-            buffer[len + 2..len + 6].copy_from_slice(&(data.initial_window_size.to_be_bytes()));
-            len += 6;
-        }
-
-        if defaults.max_frame_size != data.max_frame_size {
-            buffer[len..len + 2].copy_from_slice(&(0x5u16.to_be_bytes()));
-            buffer[len + 2..len + 6].copy_from_slice(&(data.max_frame_size.to_be_bytes()));
-            len += 6;
-        }
-
-        if defaults.max_header_list_size != data.max_header_list_size {
-            buffer[len..len + 2].copy_from_slice(&(0x6u16.to_be_bytes()));
-            buffer[len + 2..len + 6].copy_from_slice(&(data.max_header_list_size.to_be_bytes()));
-            len += 6;
-        }
-
-        write_header::<Self>(stream_id, len as u32, 0x0, output)?;
-        output.write_all(&buffer[0..len])
-    }
-}
-
-#[derive(Debug)]
-pub struct PingFrame {
-    pub is_ack: bool,
-    pub payload: u64,
-}
-
-impl PingFrame {
-    const ACK_MASK: u8 = 0x1;
-}
-
-impl FrameParse for PingFrame {
-    fn read_frame(flags: u8, len: u32, reader: &mut impl Read) -> io::Result<Self> {
-        let is_ack = flags & Self::ACK_MASK == Self::ACK_MASK;
-        let payload = read_u64(reader)?;
-
-        Ok(PingFrame { is_ack, payload })
-    }
-}
-
-impl FrameWrite for PingFrame {
-    const TYPE_NUM: u8 = 0x6;
-
-    fn write_frame(&self, stream_id: u32, output: &mut impl Write) -> io::Result<()> {
-        write_header::<Self>(stream_id, 8, if self.is_ack { 0x1 } else { 0x0 }, output)?;
-
-        write_u64(output, self.payload)
-    }
-}
-
-#[derive(Debug)]
-pub struct GoAwayFrame {
-    pub last_stream_id: u32,
-    pub error_code: u32,
-    pub additional_data: Vec<u8>,
-}
-
-impl FrameParse for GoAwayFrame {
-    fn read_frame(flags: u8, len: u32, reader: &mut impl Read) -> io::Result<Self> {
-        let stream_id = read_u32(reader)?;
-        let error_code = read_u32(reader)?;
-
-        let data_len = (len - 8) as usize;
-
-        let mut data = unsafe {
-            let mut v = Vec::with_capacity(data_len);
-            v.set_len(data_len);
-
-            v
-        };
-
-        reader.read_exact(&mut data)?;
-
-        Ok(GoAwayFrame {
-            last_stream_id: stream_id,
-            error_code,
-            additional_data: data,
-        })
-    }
-}
-
-impl FrameWrite for GoAwayFrame {
-    const TYPE_NUM: u8 = 0x7;
-
-    fn write_frame(&self, stream_id: u32, output: &mut impl Write) -> io::Result<()> {
-        write_header::<Self>(
-            stream_id,
-            (self.additional_data.len() as u32) + 8,
-            0x0,
+    pub fn write_frame(stream_id: u32, error_code: u32, output: &mut impl Write) -> io::Result<()> {
+        write_header(
+            FrameHeader {
+                frame_len: 4,
+                frame_type: TYPE_NUM,
+                flags: 0x0,
+                stream_id,
+            },
             output,
         )?;
 
-        write_u32(output, self.last_stream_id & 0x7FFFFFFF)?;
-        write_u32(output, self.error_code)?;
-
-        output.write_all(&self.additional_data)
+        write_u32(output, error_code)
+    }
+    pub const fn create_header(stream_id: u32) -> FrameHeader {
+        FrameHeader {
+            frame_len: 4,
+            frame_type: TYPE_NUM,
+            flags: 0x0,
+            stream_id,
+        }
     }
 }
 
-#[derive(Debug)]
-pub struct WindowUpdateFrame {
-    pub stream_id: u32,
+pub mod settings {
+    use super::*;
+    use std::io::{self, Read};
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct HTTP2Settings {
+        pub header_table_size: u32,
+        pub enable_push: bool,
+        pub max_concurrent_streams: Option<u32>,
+        pub initial_window_size: u32,
+        pub max_frame_size: u32,
+        pub max_header_list_size: Option<u32>,
+    }
+
+    impl HTTP2Settings {
+        fn iter(&self) -> SettingsIter<'_> {
+            SettingsIter {
+                settings: self,
+                setting_num: HEADER_TABLE_SIZE_NUM,
+            }
+        }
+    }
+
+    impl Default for HTTP2Settings {
+        fn default() -> Self {
+            HTTP2Settings {
+                header_table_size: 4096,
+                enable_push: true,
+                max_concurrent_streams: None,
+                initial_window_size: u16::MAX as u32,
+                max_frame_size: 1 << 14,
+                max_header_list_size: None,
+            }
+        }
+    }
+
+    struct SettingsIter<'a> {
+        settings: &'a HTTP2Settings,
+        setting_num: u16,
+    }
+
+    impl<'a> Iterator for SettingsIter<'a> {
+        type Item = Option<u32>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let out = Some(match self.setting_num {
+                HEADER_TABLE_SIZE_NUM => Some(self.settings.header_table_size),
+                ENABLE_PUSH_NUM => Some(if self.settings.enable_push { 0x1 } else { 0x0 }),
+                MAX_CONCURRENT_STREAMS_NUM => self.settings.max_concurrent_streams,
+                INITIAL_WINDOW_SIZE_NUM => Some(self.settings.initial_window_size),
+                MAX_FRAME_SIZE_NUM => Some(self.settings.max_frame_size),
+                MAX_HEADER_LIST_SIZE_NUM => self.settings.max_header_list_size,
+                _ => return None,
+            });
+
+            self.setting_num += 1;
+            out
+        }
+    }
+
+    pub const HEADER_TABLE_SIZE_NUM: u16 = 0x1;
+    pub const ENABLE_PUSH_NUM: u16 = 0x2;
+    pub const MAX_CONCURRENT_STREAMS_NUM: u16 = 0x3;
+    pub const INITIAL_WINDOW_SIZE_NUM: u16 = 0x4;
+    pub const MAX_FRAME_SIZE_NUM: u16 = 0x5;
+    pub const MAX_HEADER_LIST_SIZE_NUM: u16 = 0x6;
+
+    pub const ACK_BIT: u8 = 0x1;
+
+    pub const TYPE_NUM: u8 = 0x4;
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Settings {
+        Ack,
+        Settings(HTTP2Settings),
+    }
+
+    pub fn read_frame(header: FrameHeader, reader: &mut impl Read) -> io::Result<Settings> {
+        assert_eq!(header.frame_type, TYPE_NUM);
+        let FrameHeader {
+            frame_len,
+            frame_type: _,
+            flags,
+            stream_id,
+        } = header;
+
+        if stream_id != 0 {
+            return Err(io::Error::other("Settings frame stream id must be 0"));
+        }
+
+        if frame_len % 6 != 0 {
+            return Err(io::Error::other("Settings frame len was not multiple of 6"));
+        }
+
+        if flags & ACK_BIT == ACK_BIT {
+            if frame_len != 0 {
+                return Err(io::Error::other("Ack settings frame must be 0 length"));
+            }
+
+            return Ok(Settings::Ack);
+        }
+
+        let mut settings = HTTP2Settings::default();
+        let mut buf = [0u8; 6];
+        let mut read = 0;
+
+        while read < frame_len {
+            reader.read_exact(&mut buf)?;
+            read += 6;
+
+            let setting_type = read_u16(&mut &buf[0..2]).expect("Never fails");
+            let value = read_u32(&mut &buf[2..]).expect("Never fails");
+
+            match setting_type {
+                HEADER_TABLE_SIZE_NUM => settings.header_table_size = value,
+                ENABLE_PUSH_NUM => {
+                    if value == 0 {
+                        settings.enable_push = false;
+                    } else if value == 1 {
+                        settings.enable_push = true;
+                    } else {
+                        return Err(io::Error::other("Enable push setting must be 0 or 1"));
+                    }
+                }
+                MAX_CONCURRENT_STREAMS_NUM => settings.max_concurrent_streams = Some(value),
+                INITIAL_WINDOW_SIZE_NUM => settings.initial_window_size = value,
+                MAX_FRAME_SIZE_NUM => {
+                    if value < 1 << 14 || value >= 1 << 24 {
+                        return Err(io::Error::other(
+                            "Max frame size must be between 2^14 (inclusive) and 2^24 (exclusive)",
+                        ));
+                    } else {
+                        settings.max_frame_size = value;
+                    }
+                }
+                MAX_HEADER_LIST_SIZE_NUM => settings.max_header_list_size = Some(value),
+                _ => {}
+            }
+        }
+
+        Ok(Settings::Settings(settings))
+    }
+
+    pub fn write_frame(settings: Settings, output: &mut impl Write) -> io::Result<()> {
+        match settings {
+            Settings::Ack => write_header(
+                FrameHeader {
+                    frame_len: 0,
+                    frame_type: TYPE_NUM,
+                    flags: ACK_BIT,
+                    stream_id: 0x0,
+                },
+                output,
+            ),
+            Settings::Settings(s) => {
+                let def = HTTP2Settings::default();
+
+                let mut buf = [0u8; 36];
+                let mut written = 0;
+                for (n, value) in s
+                    .iter()
+                    .zip(def.iter())
+                    .enumerate()
+                    .filter(|(_, (a, b))| a != b)
+                    .filter(|(_, (a, _))| a.is_some())
+                    .map(|(n, (a, _))| (n, a.unwrap()))
+                {
+                    let mut c = io::Cursor::new(&mut buf[written..written + 6]);
+                    write_u16(&mut c, (n + 1) as u16);
+                    write_u32(&mut c, value);
+
+                    written += 6;
+                }
+
+                write_header(
+                    FrameHeader {
+                        frame_len: written as u32,
+                        frame_type: TYPE_NUM,
+                        flags: 0x0,
+                        stream_id: 0x0,
+                    },
+                    output,
+                )?;
+                output.write_all(&buf[0..written])
+            }
+        }
+    }
 }
 
-impl FrameParse for WindowUpdateFrame {
-    fn read_frame(flags: u8, len: u32, reader: &mut impl Read) -> io::Result<Self> {
-        let stream_id = read_u32(reader)?;
+pub mod ping {
+    use super::*;
+    use std::io::{self, Read, Write};
 
-        Ok(WindowUpdateFrame {
-            stream_id: stream_id,
+    pub const ACK_BIT: u8 = 0x1;
+
+    pub const TYPE_NUM: u8 = 0x6;
+
+    pub fn read_frame(header: FrameHeader, reader: &mut impl Read) -> io::Result<(u64, bool)> {
+        assert_eq!(header.frame_type, TYPE_NUM);
+        let FrameHeader {
+            frame_len,
+            frame_type: _,
+            flags,
+            stream_id,
+        } = header;
+
+        if stream_id != 0 {
+            return Err(io::Error::other("Ping frame stream id must be 0"));
+        }
+        if frame_len != 8 {
+            return Err(io::Error::other("Ping frame length was non-zero"));
+        }
+
+        let is_ack = flags & ACK_BIT == ACK_BIT;
+        let payload = read_u64(reader)?;
+
+        Ok((payload, is_ack))
+    }
+
+    pub fn write_frame(data: u64, is_ack: bool, output: &mut impl Write) -> io::Result<()> {
+        write_header(
+            FrameHeader {
+                frame_len: 8,
+                frame_type: TYPE_NUM,
+                flags: if is_ack { ACK_BIT } else { 0x0 },
+                stream_id: 0x0,
+            },
+            output,
+        )?;
+
+        write_u64(output, data)
+    }
+}
+
+pub mod go_away {
+    use super::*;
+    use std::io::{self, Read, Write};
+
+    #[derive(Debug)]
+    pub struct GoAwayFrame {
+        pub last_stream_id: u32,
+        pub error_code: u32,
+        pub additional_data: Vec<u8>,
+    }
+
+    pub const TYPE_NUM: u8 = 0x7;
+
+    pub fn read_frame(header: FrameHeader, reader: &mut impl Read) -> io::Result<GoAwayFrame> {
+        assert_eq!(header.frame_type, TYPE_NUM);
+        let FrameHeader {
+            frame_len,
+            frame_type: _,
+            flags,
+            stream_id,
+        } = header;
+
+        if stream_id != 0 {
+            return Err(io::Error::other("Go Away frame must have stream id 0"));
+        }
+
+        if frame_len < 8 {
+            return Err(io::Error::other("Go Away frame must have at least 8 bytes"));
+        }
+
+        let last_stream_id = read_u32(reader)? & 0x7FFFFFFF;
+        let error_code = read_u32(reader)?;
+        let mut additional_data = vec![0u8; frame_len as usize - 8];
+
+        reader.read_exact(&mut additional_data)?;
+
+        Ok(GoAwayFrame {
+            last_stream_id,
+            error_code,
+            additional_data,
         })
     }
-}
 
-impl FrameWrite for WindowUpdateFrame {
-    const TYPE_NUM: u8 = 0x8;
-
-    fn write_frame(&self, stream_id: u32, output: &mut impl Write) -> io::Result<()> {
-        write_header::<Self>(stream_id, 4, 0x0, output)?;
-
-        write_u32(output, self.stream_id & 0x7FFFFFFF)
-    }
-}
-
-#[repr(u8)]
-#[derive(Debug)]
-pub enum FrameType {
-    Data(DataFrame),
-    Header(HeaderFrame),
-    Priority(PriorityFrame),
-    RstStream(RstStreamFrame),
-    Settings(SettingsFrame),
-    Ping(PingFrame),
-    GoAway(GoAwayFrame),
-    WindowUpdate(WindowUpdateFrame),
-}
-
-#[derive(Debug)]
-pub struct Frame {
-    pub stream_id: u32,
-    pub data: FrameType,
-}
-
-impl Frame {
-    pub fn parse_frame(reader: &mut impl Read) -> io::Result<Frame> {
-        let frame_len = read_u24(reader)?;
-        let frame_type = read_u8(reader)?;
-        let flags = read_u8(reader)?;
-        let id = read_u32(reader)? & 0x7FFFFFFF;
-
-        println!(
-            "Flags: {flags:b}, Frame Len: {frame_len}, Frame Type: {frame_type}, Stream id: {id}"
+    pub fn write_frame(
+        last_id: u32,
+        error_code: u32,
+        additional_data: &[u8],
+        output: &mut impl Write,
+    ) -> io::Result<()> {
+        write_header(
+            FrameHeader {
+                frame_len: 8 + additional_data.len() as u32,
+                frame_type: TYPE_NUM,
+                flags: 0x0,
+                stream_id: 0x0,
+            },
+            output,
         );
 
-        let frame_data = match frame_type {
-            0x0 => FrameType::Data(FrameParse::read_frame(flags, frame_len, reader)?),
-            0x1 => FrameType::Header(FrameParse::read_frame(flags, frame_len, reader)?),
-            0x2 => {
-                if frame_len != 5 {
-                    return Err(io::Error::other("Priority frame len must be 5 octets"));
-                }
+        write_u32(output, last_id)?;
+        write_u32(output, error_code)?;
+        output.write_all(additional_data)
+    }
+}
 
-                FrameType::Priority(FrameParse::read_frame(flags, frame_len, reader)?)
-            }
-            0x3 => {
-                if frame_len != 4 {
-                    return Err(io::Error::other("RST Stream frame len must be 4 octets"));
-                }
+pub mod window_update {
+    use super::*;
+    use std::io::{self, Read, Write};
 
-                FrameType::RstStream(FrameParse::read_frame(flags, frame_len, reader)?)
-            }
-            0x4 => FrameType::Settings(FrameParse::read_frame(flags, frame_len, reader)?),
-            0x6 => {
-                if frame_len != 8 {
-                    return Err(io::Error::other("Ping frame len must be 8 octets"));
-                }
+    pub const TYPE_NUM: u8 = 0x8;
 
-                FrameType::Ping(FrameParse::read_frame(flags, frame_len, reader)?)
-            }
-            0x7 => FrameType::GoAway(FrameParse::read_frame(flags, frame_len, reader)?),
-            0x8 => {
-                if frame_len != 4 {
-                    return Err(io::Error::other("Window update frame len must be 4 octets"));
-                }
+    pub fn read_frame(header: FrameHeader, reader: &mut impl Read) -> io::Result<u32> {
+        assert_eq!(header.frame_type, TYPE_NUM);
+        let FrameHeader { frame_len, .. } = header;
 
-                FrameType::WindowUpdate(FrameParse::read_frame(flags, frame_len, reader)?)
-            }
-            t => return Err(io::Error::other(format!("Unsupported frame type {t}"))),
-        };
+        if frame_len != 4 {
+            return Err(io::Error::other("Window update frame must have length 4"));
+        }
 
-        Ok(Frame {
-            stream_id: id,
-            data: frame_data,
-        })
+        read_u32(reader)
     }
 
-    pub fn write_frame(&self, writer: &mut impl Write) -> io::Result<()> {
-        match &self.data {
-            FrameType::Data(d) => d.write_frame(self.stream_id, writer),
-            FrameType::Header(h) => h.write_frame(self.stream_id, writer),
-            FrameType::Priority(p) => p.write_frame(self.stream_id, writer),
-            FrameType::RstStream(r) => r.write_frame(self.stream_id, writer),
-            FrameType::Settings(s) => s.write_frame(self.stream_id, writer),
-            FrameType::Ping(p) => p.write_frame(self.stream_id, writer),
-            FrameType::GoAway(g) => g.write_frame(self.stream_id, writer),
-            FrameType::WindowUpdate(w) => w.write_frame(self.stream_id, writer),
-        }
+    pub fn write_frame(stream_id: u32, increment: u32, output: &mut impl Write) -> io::Result<()> {
+        write_header(
+            FrameHeader {
+                frame_len: 4,
+                frame_type: TYPE_NUM,
+                flags: 0x0,
+                stream_id,
+            },
+            output,
+        )?;
+        write_u32(output, increment)
     }
 }
