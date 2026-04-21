@@ -2,11 +2,17 @@ use std::{
     borrow::Borrow,
     io::{Read, Write},
     net::Ipv4Addr,
+    time::Instant,
 };
 
 use crate::{
     http::{
-        http2, http11,
+        http2::{
+            self,
+            frame::{FrameHeader, go_away, ping},
+            hpack::tables::HeaderTable,
+        },
+        http11,
         response::{ResponseWriter, StatusCode},
     },
     tls::listener::TlsListener,
@@ -45,6 +51,7 @@ fn main() {
         let alpn = stream.get_selected_alpn();
         println!("{}", String::from_utf8_lossy(alpn));
 
+        let mut table = HeaderTable::new(65536);
         let (mut req, mut writer): (_, Box<dyn ResponseWriter>) =
             match String::from_utf8_lossy(alpn).borrow() {
                 "http/1.1" => {
@@ -61,7 +68,7 @@ fn main() {
                     (req, writer)
                 }
                 "h2" => {
-                    let req = match http2::parse_request(&stream) {
+                    let (id, req) = match http2::parse_request(&stream, &mut table) {
                         Ok(r) => r,
                         Err(e) => {
                             println!("Failed to parse request: {e}");
@@ -69,7 +76,7 @@ fn main() {
                         }
                     };
 
-                    let writer = Box::new(http2::ResponseWriter::new(&stream));
+                    let writer = Box::new(http2::ResponseWriter::new(&stream, 3));
 
                     (req, writer)
                 }
@@ -89,11 +96,20 @@ fn main() {
         v.extend(b"Goodbye\n");
 
         match writer.write_all(&v) {
-            Ok(_) => {}
+            Ok(()) => {}
             Err(e) => {
                 println!("Failed to write request: {e}");
             }
         }
+        println!("Reading next frame");
+        let start = Instant::now();
+        _ = ping::write_frame(0xfa041bf858403cd7, false, &mut &stream);
+        println!("Sent ping: {}", 0xfa041bf858403cd7u64);
+        let h = FrameHeader::read_header(&mut &stream).expect("Should get another frame");
+        let finish = start.elapsed();
+        println!("Read {:?} in {finish:?}", h);
+        println!("{:?}", ping::read_frame(h, &mut &stream));
+        println!("{:?}", go_away::write_frame(3, 0x0, &[], &mut &stream));
 
         println!("served request");
     }
