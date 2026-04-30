@@ -1,25 +1,13 @@
-use std::{
-    borrow::Borrow,
-    io::{Read, Write},
-    net::Ipv4Addr,
-    time::Instant,
+use std::{borrow::Borrow, net::Ipv4Addr};
+
+use http_rs::{
+    bio::{Reader, Writer},
+    http11,
 };
 
-use crate::{
-    http::{
-        http2::{
-            self,
-            frame::{FrameHeader, go_away, ping},
-            hpack::tables::HeaderTable,
-        },
-        http11,
-        response::{ResponseWriter, StatusCode},
-    },
-    tls::listener::TlsListener,
-};
+use crate::{plugin::Plugin, tls::listener::TlsListener};
 
-mod ffi;
-mod http;
+mod plugin;
 mod tls;
 
 fn main() {
@@ -33,6 +21,9 @@ fn main() {
         .expect("Failed to set up key pair");
 
     println!("Set up key pair");
+
+    let mut plugin =
+        unsafe { Plugin::load_plugin(c"./test_plugin.so").expect("Failed to load test plugin") };
 
     loop {
         let res = listener.accept();
@@ -48,68 +39,42 @@ fn main() {
             }
         };
 
-        let alpn = stream.get_selected_alpn();
-        println!("{}", String::from_utf8_lossy(alpn));
+        let alpn = stream.get_selected_alpn().to_owned();
+        println!("{}", String::from_utf8_lossy(&alpn));
 
-        let mut table = HeaderTable::new(65536);
-        let (mut req, mut writer): (_, Box<dyn ResponseWriter>) =
-            match String::from_utf8_lossy(alpn).borrow() {
-                "http/1.1" => {
-                    let req = match http11::parse_request(&stream) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            println!("Failed to parse request: {e}");
-                            continue;
-                        }
-                    };
-
-                    let writer = Box::new(http11::ResponseWriter::new(&stream));
-
-                    (req, writer)
-                }
-                "h2" => {
-                    let (id, req) = match http2::parse_request(&stream, &mut table) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            println!("Failed to parse request: {e}");
-                            continue;
-                        }
-                    };
-
-                    let writer = Box::new(http2::ResponseWriter::new(&stream, 3));
-
-                    (req, writer)
-                }
-                t => {
-                    println!("Unsupported protocol: {t}");
-                    continue;
-                }
-            };
-
-        let mut v = Vec::new();
-        _ = req.body.read_to_end(&mut v);
-
-        println!("{}", String::from_utf8_lossy(&v));
-
-        _ = writer.write_status(StatusCode::OK);
-
-        v.extend(b"Goodbye\n");
-
-        match writer.write_all(&v) {
-            Ok(()) => {}
+        let (read, write) = match stream.split() {
+            Ok(v) => v,
             Err(e) => {
-                println!("Failed to write request: {e}");
+                println!("Failed to split tls stream: {e}");
+                continue;
             }
-        }
-        println!("Reading next frame");
-        let start = Instant::now();
-        _ = ping::write_frame(0xfa041bf858403cd7, false, &mut &stream);
-        println!("Sent ping: {}", 0xfa041bf858403cd7u64);
-        let h = FrameHeader::read_header(&mut &stream).expect("Should get another frame");
-        let finish = start.elapsed();
-        println!("Read {:?} in {finish:?}", h);
-        println!("{:?}", ping::read_frame(h, &mut &stream));
-        println!("{:?}", go_away::write_frame(3, 0x0, &[], &mut &stream));
+        };
+
+        let (req, writer) = match String::from_utf8_lossy(&alpn).borrow() {
+            "http/1.1" => {
+                let reader = Reader::new(read);
+                let writer = Writer::new(write);
+
+                let req = http11::parse_request(reader).expect("Failed to parse http1.1 request");
+                let writer = http11::new_response_writer(writer);
+
+                (req, writer)
+            }
+            // "h2" => {
+            //     let reader = reader_from_read(read);
+            //     let writer = writer_from_write(write);
+            //     let req = unsafe { http_parse_http2_request(reader, writer) };
+            //     let writer = unsafe { http_http2_response_writer(3, writer) };
+            //
+            //     (req, writer)
+            // }
+            t => {
+                println!("Unsupported protocol: {t}");
+                continue;
+            }
+        };
+
+        plugin.handle_request(req, writer);
 
         println!("served request");
     }
