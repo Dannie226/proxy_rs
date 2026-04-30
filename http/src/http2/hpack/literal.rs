@@ -1,8 +1,8 @@
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
-use bstr::{BStr, BString};
+use bstr::BString;
 
-use crate::http::http2::hpack::huffman::decode_bytes;
+use super::huffman::decode_bytes;
 
 pub fn parse_integer(bits: u8, data: &[u8]) -> io::Result<(u64, usize)> {
     let first_byte = data[0];

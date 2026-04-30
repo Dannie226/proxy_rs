@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
     collections::{VecDeque, vec_deque::Iter},
-    iter::repeat_n,
 };
 
 use bstr::{BStr, BString};

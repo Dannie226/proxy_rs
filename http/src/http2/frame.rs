@@ -1,17 +1,12 @@
 use std::{
-    borrow::{Borrow, Cow},
+    borrow::Cow,
     io::{self, Read, Write},
 };
 
 use bstr::{BStr, BString};
 
-use crate::{
-    ffi::rand::fill_bytes,
-    http::{
-        http2::hpack::{self, huffman, literal},
-        request::HeaderMap,
-    },
-};
+use super::hpack::{self, *};
+use crate::request::HeaderMap;
 
 fn read_u8(reader: &mut impl Read) -> io::Result<u8> {
     let mut v = [0u8; 1];
@@ -125,7 +120,10 @@ pub mod data {
 
     pub const TYPE_NUM: u8 = 0x0;
 
-    fn read_frame(header: FrameHeader, frame_data: &mut impl Read) -> io::Result<(Vec<u8>, bool)> {
+    pub fn read_frame(
+        header: FrameHeader,
+        frame_data: &mut impl Read,
+    ) -> io::Result<(Vec<u8>, bool)> {
         assert_eq!(header.frame_type, TYPE_NUM);
         let FrameHeader {
             frame_len,
@@ -145,6 +143,7 @@ pub mod data {
         } as u32;
 
         let data_len = frame_len - pad_bytes;
+        let mut pad = [0u8; 256];
 
         // Safety: I am creating the vec with the capacity, and then setting it's length
         // These are also raw bytes, so nothing wrong there
@@ -155,6 +154,7 @@ pub mod data {
         };
 
         frame_data.read_exact(&mut data)?;
+        frame_data.read_exact(&mut pad[0..pad_bytes as usize])?;
 
         Ok((data, flags & END_BIT == END_BIT))
     }
@@ -180,7 +180,7 @@ pub mod data {
 }
 
 pub mod header {
-    use crate::http::http2::hpack::{literal::write_integer, tables::HeaderTable};
+    use super::hpack::tables::HeaderTable;
 
     use super::*;
     use std::io::{self, Read};
@@ -286,7 +286,7 @@ pub mod header {
                 decode_table.insert(&*n, &value);
                 insert_header(&mut headers, n, value.into());
             } else if first_byte & 0x20 == 0x20 {
-                let (new_size, count) = literal::parse_integer(5, &v[offset..])?;
+                let (_new_size, count) = literal::parse_integer(5, &v[offset..])?;
                 offset += count;
             } else if first_byte & 0x10 == 0x10 {
                 println!("Without");
@@ -622,8 +622,8 @@ pub mod settings {
                     .map(|(n, (a, _))| (n, a.unwrap()))
                 {
                     let mut c = io::Cursor::new(&mut buf[written..written + 6]);
-                    write_u16(&mut c, (n + 1) as u16);
-                    write_u32(&mut c, value);
+                    write_u16(&mut c, (n + 1) as u16)?;
+                    write_u32(&mut c, value)?;
 
                     written += 6;
                 }
@@ -706,7 +706,7 @@ pub mod go_away {
         let FrameHeader {
             frame_len,
             frame_type: _,
-            flags,
+            flags: _,
             stream_id,
         } = header;
 
@@ -745,7 +745,7 @@ pub mod go_away {
                 stream_id: 0x0,
             },
             output,
-        );
+        )?;
 
         write_u32(output, last_id)?;
         write_u32(output, error_code)?;
