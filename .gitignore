@@ -1,5 +1,6 @@
 /target
 /http/target
+/http_rs/target
 
 /cert.pem
 /key.pem
