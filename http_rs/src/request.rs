@@ -138,3 +138,14 @@ impl<'a> Drop for Request<'a> {
         }
     }
 }
+
+// SAFETY:
+// Request can be sent to another thread, as it holds the unique
+// pointer to the underlying request
+// Yes, the get_ffi method exists, but to use the pointer, you have to use
+// unsafe code anyways, so it isn't really violating safety requirements
+// All of the methods that take a &self also take a *const Request, and so
+// are safe to use across threads as the underlying data cannot be modified
+// therefore, Request is Sync too
+unsafe impl<'a> Send for Request<'a> {}
+unsafe impl<'a> Sync for Request<'a> {}

@@ -149,3 +149,12 @@ impl<'a> Drop for ResponseWriter<'a> {
         }
     }
 }
+
+// SAFETY:
+// ResponseWriter can be sent to another thread, as it holds the unique
+// pointer to the underlying writer
+// Yes, the get_ffi method exists, but to use the pointer, you have to use
+// unsafe code anyways, so it isn't really violating safety requirements
+// This also means it is ok to Sync the writer across threads
+unsafe impl<'a> Send for ResponseWriter<'a> {}
+unsafe impl<'a> Sync for ResponseWriter<'a> {}

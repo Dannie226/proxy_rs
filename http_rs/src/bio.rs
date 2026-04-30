@@ -64,10 +64,10 @@ pub mod ffi {
 
 pub struct Reader<'a>(*mut ffi::Reader, PhantomData<&'a ()>);
 
-// SAFETY:
-// arg must be convertable to a reference of T
-// data must be convertable to a slice of len bytes
-// res must be convertable to a reference
+/// SAFETY:
+/// arg must be convertable to a reference of T
+/// data must be convertable to a slice of len bytes
+/// res must be convertable to a reference
 unsafe extern "C" fn read<T: Read>(
     arg: *mut c_void,
     data: *mut c_void,
@@ -88,10 +88,10 @@ unsafe extern "C" fn read<T: Read>(
     *res = r.into_ffi();
 }
 
-// SAFETY:
-// arg must be convertable to a reference of T
-// data must be convertable to a slice of len bytes
-// res must be convertable to a reference
+/// SAFETY:
+/// arg must be convertable to a reference of T
+/// data must be convertable to a slice of len bytes
+/// res must be convertable to a reference
 unsafe extern "C" fn write<T: Write>(
     arg: *mut c_void,
     data: *const c_void,
@@ -112,16 +112,16 @@ unsafe extern "C" fn write<T: Write>(
     *res = r.into_ffi();
 }
 
-// SAFETY:
-// arg must be a pointer to a T,
-// arg must have been created via Box::into_raw on a T
+/// SAFETY:
+/// arg must be a pointer to a T,
+/// arg must have been created via Box::into_raw on a T
 unsafe extern "C" fn clear_read<T: Read>(arg: *mut c_void) {
     drop(unsafe { Box::from_raw(arg.cast::<T>()) });
 }
 
-// SAFETY:
-// arg must be a pointer to a T,
-// arg must have been created via Box::into_raw on a T
+/// SAFETY:
+/// arg must be a pointer to a T,
+/// arg must have been created via Box::into_raw on a T
 unsafe extern "C" fn clear_write<T: Write>(arg: *mut c_void) {
     drop(unsafe { Box::from_raw(arg.cast::<T>()) });
 }
@@ -157,6 +157,13 @@ impl<'a> Read for Reader<'a> {
         Result::from_ffi(r).into_io_result()
     }
 }
+
+// SAFETY:
+// A reader is the sole owner of the underlying pointer, so as long as it's lifetime lives long
+// enough, it is safe to send to another thread
+// It is also safe to send &Reader to another thread, though you cannot actually do anything with it
+unsafe impl<'a> Send for Reader<'a> {}
+unsafe impl<'a> Sync for Reader<'a> {}
 
 impl<'a> Drop for Reader<'a> {
     fn drop(&mut self) {
@@ -219,3 +226,10 @@ impl<'a> Drop for Writer<'a> {
         }
     }
 }
+
+// SAFETY:
+// A writer is the sole owner of the underlying pointer, so as long as it's lifetime lives long
+// enough, it is safe to send to another thread
+// It is also safe to send &Writer to another thread, though you cannot actually do anything with it
+unsafe impl<'a> Send for Writer<'a> {}
+unsafe impl<'a> Sync for Writer<'a> {}
