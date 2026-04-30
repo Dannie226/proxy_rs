@@ -1,18 +1,17 @@
-use core::slice;
 use std::{
     ffi::{CStr, c_int, c_uchar, c_uint, c_void},
-    io::{self, Read, Write},
+    io::{self},
     marker::PhantomData,
-    net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
-    os::fd::{FromRawFd, IntoRawFd},
+    net::{SocketAddr, TcpListener, ToSocketAddrs},
     ptr::{self, NonNull},
 };
 
 use anyhow::Context;
+use openssl_sys::*;
 
-use crate::ffi::{self, error::Error, ssl::*};
+use crate::tls::{self, Error, stream::*};
 
-static PROTOS: &[u8] = b"\x02h2\x08http/1.1";
+static PROTOS: &[u8] = b"\x08http/1.1";
 
 extern "C" fn select_alpn(
     _ssl: *mut SSL,
@@ -54,7 +53,7 @@ struct SSLContext {
 }
 
 impl SSLContext {
-    fn new(method: *const SSL_METHOD) -> ffi::error::Result<SSLContext> {
+    fn new(method: *const SSL_METHOD) -> tls::Result<SSLContext> {
         let ctx = NonNull::new(unsafe { SSL_CTX_new(method) }).ok_or_else(Error::next_error)?;
 
         let ctx = SSLContext {
@@ -63,7 +62,11 @@ impl SSLContext {
         };
 
         unsafe {
-            SSL_CTX_set_alpn_select_cb(ctx.ctx.as_ptr(), select_alpn, ptr::null_mut());
+            SSL_CTX_set_alpn_select_cb__fixed_rust(
+                ctx.ctx.as_ptr(),
+                Some(select_alpn),
+                ptr::null_mut(),
+            );
         }
 
         Ok(ctx)
@@ -98,123 +101,6 @@ impl Drop for SSLContext {
     }
 }
 
-pub struct TlsStream {
-    ssl: NonNull<SSL>,
-    stream: c_int,
-    _marker: PhantomData<SSL>,
-}
-
-impl TlsStream {
-    pub fn new(listener: &TlsListener, stream: TcpStream) -> anyhow::Result<TlsStream> {
-        let ssl = NonNull::new(unsafe { SSL_new(listener.ctx.ctx.as_ptr()) })
-            .ok_or_else(Error::next_error)
-            .context("Failed to create new TLS stream")?;
-
-        let fd = stream.into_raw_fd();
-
-        unsafe { SSL_set_fd(ssl.as_ptr(), fd) };
-
-        if unsafe { SSL_accept(ssl.as_ptr()) } <= 0 {
-            Err(Error::next_error()).context("Failed TLS handshake")?;
-        }
-
-        Ok(TlsStream {
-            ssl,
-            stream: fd,
-            _marker: PhantomData {},
-        })
-    }
-
-    pub fn get_selected_alpn(&self) -> &'_ [u8] {
-        unsafe {
-            let mut data = ptr::null();
-            let mut len = 0;
-            SSL_get0_alpn_selected(self.ssl.as_ptr(), &raw mut data, &raw mut len);
-
-            if data.is_null() {
-                "No negotiated protocol".as_bytes()
-            } else {
-                slice::from_raw_parts(data, len as usize)
-            }
-        }
-    }
-}
-
-impl Drop for TlsStream {
-    fn drop(&mut self) {
-        unsafe {
-            SSL_shutdown(self.ssl.as_ptr());
-            SSL_free(self.ssl.as_ptr());
-            // Safety: TlsStream is the sole owner of the stream file descriptor
-            TcpStream::from_raw_fd(self.stream);
-        }
-    }
-}
-
-impl Read for &TlsStream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut read_len = 0;
-        let ok = unsafe {
-            SSL_read_ex(
-                self.ssl.as_ptr(),
-                buf.as_mut_ptr() as *mut c_void,
-                buf.len(),
-                &raw mut read_len,
-            )
-        };
-
-        if ok == 0 {
-            return Err(io::Error::other(Error::next_error()));
-        }
-
-        Ok(read_len)
-    }
-}
-
-impl Write for &TlsStream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut written = 0;
-
-        let ok = unsafe {
-            SSL_write_ex(
-                self.ssl.as_ptr(),
-                buf.as_ptr() as *const c_void,
-                buf.len(),
-                &raw mut written,
-            )
-        };
-
-        if ok == 0 {
-            return Err(io::Error::other(Error::next_error()));
-        }
-
-        return Ok(written);
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Read for TlsStream {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        (&*self).read(buf)
-    }
-}
-
-impl Write for TlsStream {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        (&*self).write(buf)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        (&*self).flush()
-    }
-}
-
-// I would like to be able to send this around to different threads
-unsafe impl Send for TlsStream {}
-
 pub struct TlsListener {
     listener: TcpListener,
     ctx: SSLContext,
@@ -243,7 +129,9 @@ impl TlsListener {
             .accept()
             .context("Failed to accept new connection")?;
 
-        let stream = TlsStream::new(self, stream).map_err(io::Error::other)?;
+        // SAFETY: The ssl context on self is valid
+        let stream =
+            unsafe { TlsStream::new(self.ctx.ctx.as_ptr(), stream).map_err(io::Error::other)? };
 
         Ok((stream, addr))
     }
