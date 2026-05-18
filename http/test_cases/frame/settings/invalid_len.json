@@ -1,0 +1,16 @@
+{
+    "name": "Invalid Length",
+    "wire": "00000404000000000000000000",
+    "expected": {
+        "settings": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+        ],
+        "ack": false,
+        "error": 6
+    }
+}

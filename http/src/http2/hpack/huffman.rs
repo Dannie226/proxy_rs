@@ -1,6 +1,6 @@
-use std::io;
+use std::{error::Error, fmt::Display};
 
-use bstr::BString;
+use crate::buffer::Buffer;
 
 static HUFFMAN_CODES: [u32; 257] = [
     0x1ff8, 0x7fffd8, 0xfffffe2, 0xfffffe3, 0xfffffe4, 0xfffffe5, 0xfffffe6, 0xfffffe7, 0xfffffe8,
@@ -30,7 +30,7 @@ static HUFFMAN_CODES: [u32; 257] = [
     0xffffffe, 0x7ffffec, 0x7ffffed, 0x7ffffee, 0x7ffffef, 0x7fffff0, 0x3ffffee, 0x3fffffff,
 ];
 
-static HUFFMAN_CODE_LEN: [usize; 257] = [
+static HUFFMAN_CODE_LEN: [u32; 257] = [
     13, 23, 28, 28, 28, 28, 28, 28, 28, 24, 30, 28, 28, 30, 28, 28, 28, 28, 28, 28, 28, 28, 30, 28,
     28, 28, 28, 28, 28, 28, 28, 28, 6, 10, 10, 12, 13, 6, 8, 11, 10, 10, 8, 11, 8, 6, 6, 6, 5, 5,
     5, 6, 6, 6, 6, 6, 6, 6, 7, 8, 15, 6, 12, 10, 13, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
@@ -581,44 +581,79 @@ static TREE_LIST: [TreeNode; 513] = [
     TreeNode::leaf(256),
 ];
 
-pub fn encode_bytes(data: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(data.len());
-    let mut offset = 0;
+pub fn encode_bytes(data: &[u8], out: &mut Buffer) {
+    let mut offset = 7u8;
+    out.clear();
 
     for &v in data {
-        let v = v as usize;
+        let index = v as usize;
 
-        for i in (0..HUFFMAN_CODE_LEN[v] as u32).rev() {
-            if offset == 0 {
-                output.push(0);
+        for i in (0..HUFFMAN_CODE_LEN[index]).rev() {
+            let bit = ((HUFFMAN_CODES[index] >> i) & 0x1) as u8;
+
+            if offset == 7 {
+                out.push(0);
             }
 
-            let last = output.last_mut().unwrap();
+            let last = out.last_mut().unwrap();
 
-            *last |= (((HUFFMAN_CODES[v] >> i) & 0x1) as u8) << (offset as u8);
+            *last |= bit << offset;
 
-            offset = (offset + 1) & 7;
+            offset = offset.wrapping_sub(1) & 7;
         }
     }
 
-    for i in (0..HUFFMAN_CODE_LEN[256] as u32).rev() {
-        if offset == 0 {
-            break;
-        }
+    if offset != 7 {
+        let last = out.last_mut().unwrap();
 
-        let last = output.last_mut().unwrap();
-
-        *last |= (((HUFFMAN_CODES[256] >> i) & 0x1) as u8) << (offset as u8);
-
-        offset = (offset + 1) & 7;
+        *last |= (1 << (offset + 1)) - 1;
     }
-
-    output
 }
 
-pub fn decode_bytes(data: &[u8]) -> io::Result<BString> {
+pub fn get_size(data: &[u8]) -> usize {
+    let mut size = 0;
+
+    for &v in data {
+        size += HUFFMAN_CODE_LEN[v as usize];
+    }
+
+    let rem = size % 8;
+    size /= 8;
+    size += if rem > 0 { 1 } else { 0 };
+
+    size as usize
+}
+
+#[derive(Clone, Copy, Debug)]
+#[repr(u32)]
+pub enum DecodeError {
+    TooSmall = 0,
+    Overflow = 1,
+    FoundEOS = 2,
+    IncompleteData = 3,
+    IndexNotFound = 4,
+    TableTooSmall = 5,
+}
+
+impl Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TooSmall => "Not enough data to parse next item",
+            Self::Overflow => "Data overflowed type",
+            Self::FoundEOS => "Found EOS while decoding",
+            Self::IncompleteData => "Incomplete data",
+            Self::IndexNotFound => "Index not found in tables",
+            Self::TableTooSmall => "Table too small for given size",
+        })
+    }
+}
+
+impl Error for DecodeError {}
+
+pub fn decode_bytes(data: &[u8], out: &mut Buffer) -> Result<(), DecodeError> {
     let mut index = 0;
-    let mut output = Vec::with_capacity(data.len());
+    let mut all_ones = None;
+    out.clear();
 
     for &v in data {
         for off in (0..8).rev() {
@@ -627,19 +662,190 @@ pub fn decode_bytes(data: &[u8]) -> io::Result<BString> {
             let indices = TREE_LIST[index].get_indices();
 
             if bit == 0x1 {
+                if all_ones.is_none() {
+                    all_ones = Some(true);
+                }
+
                 index = indices.1;
             } else {
+                all_ones = Some(false);
                 index = indices.0;
             }
 
             let indices = TREE_LIST[index].get_indices();
 
             if indices.0 == 0 {
-                output.push(indices.1 as u8);
+                if indices.1 == 256 {
+                    return Err(DecodeError::FoundEOS);
+                }
+                out.push(indices.1 as u8);
                 index = 0;
+                all_ones = None;
             }
         }
     }
 
-    Ok(output.into())
+    if !all_ones.unwrap_or(true) {
+        return Err(DecodeError::IncompleteData);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs::File, io::Read};
+
+    use bstr::BStr;
+
+    use crate::buffer::{http_clear_buffer, http_new_buffer};
+
+    use super::*;
+
+    #[test]
+    fn test_headers() {
+        let data: [&[u8]; _] = [
+            b"content-length",
+            b"content-type",
+            b"content-encoding",
+            b"transfer-encoding",
+            b"www-authenticate",
+            b"proxy-authenticate",
+            b"proxy-authorization",
+            b"authorization",
+            b"allow",
+            b"set-cookie",
+            b"cookie",
+            b"accept-language",
+            b"en-US,en;q=0.9",
+        ];
+
+        let mut enc_buf = http_new_buffer(32);
+        let mut dec_buf = http_new_buffer(32);
+
+        for header in data {
+            let size_hint = get_size(header);
+            encode_bytes(header, &mut enc_buf);
+            decode_bytes(&enc_buf, &mut dec_buf).unwrap();
+
+            assert_eq!(
+                header,
+                &*dec_buf,
+                "Failed to encode/decode header: {}",
+                BStr::new(header)
+            );
+
+            assert_eq!(
+                enc_buf.len,
+                size_hint,
+                "Get size mismatch for header: {}",
+                BStr::new(header)
+            );
+        }
+
+        unsafe {
+            http_clear_buffer(&mut dec_buf);
+            http_clear_buffer(&mut enc_buf);
+        }
+    }
+
+    #[test]
+    fn test_random() {
+        let mut rng = File::open("/dev/urandom").expect("Should be able to open /dev/urandom");
+
+        let mut enc_buf = http_new_buffer(16);
+        let mut dec_buf = http_new_buffer(16);
+
+        for _ in 0..4096 {
+            let mut data = [0u8; 16];
+
+            for _ in 0..16 {
+                rng.read_exact(&mut data)
+                    .expect("Should be able to read random data");
+            }
+
+            let size_hint = get_size(&data);
+            encode_bytes(&data, &mut enc_buf);
+            decode_bytes(&enc_buf, &mut dec_buf).unwrap();
+
+            assert_eq!(data, &*dec_buf, "Failed to encode/decode random data");
+            assert_eq!(enc_buf.len, size_hint, "Get size mismatch");
+        }
+
+        unsafe {
+            http_clear_buffer(&mut dec_buf);
+        }
+    }
+
+    #[test]
+    fn test_bytes() {
+        let mut enc_buf = http_new_buffer(4);
+        let mut dec_buf = http_new_buffer(1);
+
+        for i in 0..=u8::MAX {
+            let size_hint = get_size(&[i]);
+            encode_bytes(&[i], &mut enc_buf);
+            decode_bytes(&enc_buf, &mut dec_buf).unwrap();
+
+            assert_eq!(i, dec_buf[0], "Failed to encode/decode byte: {i}");
+            assert_eq!(enc_buf.len, size_hint, "Get size mismatch");
+        }
+
+        unsafe {
+            http_clear_buffer(&mut dec_buf);
+        }
+    }
+
+    #[test]
+    fn test_invalid() {
+        let mut buffer = http_new_buffer(0);
+        // Incomplete exclamation point, obviously invalid
+        let mut data = [0xFE];
+
+        let decoded = decode_bytes(&data, &mut buffer);
+        assert!(decoded.is_err(), "Incomplete data should be invalid");
+
+        // Complete percent sign, zeros at end
+        data[0] = 0x54;
+
+        let decoded = decode_bytes(&data, &mut buffer);
+        assert!(
+            decoded.is_err(),
+            "Complete data with zeros at end should be invalid"
+        );
+
+        // Zero, with zeros at end, invalid
+        data[0] = 0x00;
+
+        let decoded = decode_bytes(&data, &mut buffer);
+        assert!(
+            decoded.is_err(),
+            "Complete data with zeros at end should be invalid"
+        );
+
+        unsafe {
+            http_clear_buffer(&mut buffer);
+        }
+    }
+
+    #[test]
+    fn test_eos() {
+        let mut buffer = http_new_buffer(0);
+
+        let data = [0xFF, 0xFF, 0xFF, 0xFF];
+
+        let decoded = decode_bytes(&data, &mut buffer);
+        assert!(
+            decoded.is_err(),
+            "EOS indicator is invalid (even if rest is valid)"
+        );
+
+        let data = [0xFE, 0x3F, 0xFF, 0xFF, 0xFF];
+        let decoded = decode_bytes(&data, &mut buffer);
+        assert!(decoded.is_err(), "EOS indicator is invalid");
+
+        unsafe {
+            http_clear_buffer(&mut buffer);
+        }
+    }
 }

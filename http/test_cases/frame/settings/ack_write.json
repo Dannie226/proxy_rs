@@ -1,0 +1,16 @@
+{
+    "name": "Write Ack",
+    "wire": "000000040100000000",
+    "expected": {
+        "settings": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+        ],
+        "ack": true,
+        "error": null
+    }
+}

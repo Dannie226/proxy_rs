@@ -1,0 +1,10 @@
+{
+    "name": "Basic Write",
+    "wire": "000018000100000001f9b82402dfcfc4ec3bcc7d88df4dca069b1f78c2e6f585e1",
+    "pad": null,
+    "expected": {
+        "is_end": true,
+        "data": "f9b82402dfcfc4ec3bcc7d88df4dca069b1f78c2e6f585e1",
+        "error": null
+    }
+}

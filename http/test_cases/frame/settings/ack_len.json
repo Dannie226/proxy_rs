@@ -1,0 +1,16 @@
+{
+    "name": "Ack with Length",
+    "wire": "000006040100000000000000000000",
+    "expected": {
+        "settings": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+        ],
+        "ack": false,
+        "error": 6
+    }
+}

@@ -1,0 +1,10 @@
+{
+    "name": "Padded",
+    "wire": "000021000900000001085b604013005ee0ae52f6005d2c7833fafc9e929b322b334a0000000000000000",
+    "pad": null,
+    "expected": {
+        "is_end": true,
+        "data": "5b604013005ee0ae52f6005d2c7833fafc9e929b322b334a",
+        "error": null
+    }
+}

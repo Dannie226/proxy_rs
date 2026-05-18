@@ -1,0 +1,10 @@
+{
+    "name": "Stream Padded Write",
+    "wire": "00001e00080000000105e9a0046e619ed54c65390e9a25227e09cfa11ad09d7825900000000000",
+    "pad": 5,
+    "expected": {
+        "is_end": false,
+        "data": "e9a0046e619ed54c65390e9a25227e09cfa11ad09d782590",
+        "error": null
+    }
+}

@@ -1,0 +1,16 @@
+{
+    "name": "Invalid Window Size",
+    "wire": "000006040000000000000480000000",
+    "expected": {
+        "settings": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+        ],
+        "ack": false,
+        "error": 3
+    }
+}

@@ -1,9 +1,6 @@
-use std::{
-    borrow::Cow,
-    collections::{VecDeque, vec_deque::Iter},
-};
+use std::collections::{VecDeque, vec_deque::Iter};
 
-use bstr::{BStr, BString};
+use crate::{buffer::Buffer, http2::error::ErrorCode};
 
 pub struct StaticEntry {
     pub name: &'static [u8],
@@ -83,6 +80,7 @@ pub static STATIC_TABLE: [StaticEntry; 61] = [
 pub struct DynamicTable {
     buffer: VecDeque<u8>,
     max_size: usize,
+    permitted_size: usize,
     num_elements: usize,
 }
 
@@ -91,6 +89,7 @@ impl DynamicTable {
         DynamicTable {
             buffer: VecDeque::with_capacity(max_permitted_size),
             max_size: max_permitted_size,
+            permitted_size: max_permitted_size,
             num_elements: 0,
         }
     }
@@ -107,6 +106,37 @@ impl DynamicTable {
         u64::from_le_bytes(size)
     }
 
+    fn evict(&mut self) {
+        let size = self.get_size(0) as usize;
+
+        self.buffer.drain(0..size);
+        self.num_elements -= 1;
+    }
+
+    pub fn reset_permissible_size(&mut self, new_size: usize) -> ErrorCode {
+        if self.num_elements != 0 {
+            return ErrorCode::CompressionError;
+        }
+
+        self.buffer.clear();
+        self.buffer.reserve_exact(new_size);
+        self.max_size = new_size;
+        self.permitted_size = new_size;
+
+        return ErrorCode::NoError;
+    }
+
+    pub fn resize(&mut self, new_size: usize) {
+        if new_size > self.permitted_size {
+            return;
+        }
+
+        while self.buffer.len() > new_size {
+            self.evict();
+        }
+        self.max_size = new_size;
+    }
+
     pub fn insert(&mut self, name: &[u8], value: &[u8]) {
         let size = name.len() + value.len() + 32;
 
@@ -115,10 +145,7 @@ impl DynamicTable {
                 return;
             }
 
-            let size = self.get_size(0) as usize;
-
-            self.buffer.drain(0..size);
-            self.num_elements -= 1;
+            self.evict();
         }
 
         self.buffer.extend((size as u64).to_le_bytes());
@@ -167,28 +194,31 @@ impl HeaderTable {
     pub fn get(
         &self,
         index: usize,
-        get_value: bool,
-    ) -> Option<(Cow<'static, BStr>, Option<BString>)> {
+        name: &mut Buffer,
+        value: Option<&mut Buffer>,
+    ) -> Result<(), ()> {
         if index == 0 {
-            None
+            Err(())
         } else if index <= 61 {
-            Some((
-                Cow::Borrowed(STATIC_TABLE[index - 1].name.into()),
-                STATIC_TABLE[index - 1]
-                    .value
-                    .filter(|_| get_value)
-                    .map(Into::into),
-            ))
+            let entry = &STATIC_TABLE[index - 1];
+            name.push_slice(entry.name);
+            match (value, entry.value) {
+                (Some(w_val), Some(e_val)) => w_val.push_slice(e_val),
+                _ => {}
+            };
+
+            Ok(())
         } else {
-            self.0.get(index - 62).map(|(n, v)| {
-                (
-                    Cow::Owned(n.copied().collect()),
-                    Some(v)
-                        .filter(|_| get_value)
-                        .map(Iterator::copied)
-                        .map(Iterator::collect),
-                )
-            })
+            let Some((n, v)) = self.0.get(index - 62) else {
+                return Err(());
+            };
+
+            name.extend(n.copied());
+            if let Some(value) = value {
+                value.extend(v.copied());
+            }
+
+            Ok(())
         }
     }
 
@@ -198,5 +228,17 @@ impl HeaderTable {
 
     pub fn dyn_size(&self) -> usize {
         self.0.num_elements
+    }
+
+    pub fn reset_permissible_size(&mut self, new_size: usize) -> ErrorCode {
+        self.0.reset_permissible_size(new_size)
+    }
+
+    pub fn resize(&mut self, new_size: usize) {
+        self.0.resize(new_size)
+    }
+
+    pub fn get_max_size(&self) -> usize {
+        self.0.permitted_size
     }
 }

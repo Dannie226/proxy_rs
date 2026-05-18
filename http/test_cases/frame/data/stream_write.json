@@ -1,0 +1,10 @@
+{
+    "name": "Stream Write",
+    "wire": "0000180000000000016e1e7b8c26f7d69998d3b536a23fc91e4bb7f2a5016806d1",
+    "pad": null,
+    "expected": {
+        "is_end": false,
+        "data": "6e1e7b8c26f7d69998d3b536a23fc91e4bb7f2a5016806d1",
+        "error": null
+    }
+}

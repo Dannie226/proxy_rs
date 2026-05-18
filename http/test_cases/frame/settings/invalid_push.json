@@ -1,0 +1,16 @@
+{
+    "name": "Invalid Enable Push",
+    "wire": "000006040000000000000200000002",
+    "expected": {
+        "settings": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+        ],
+        "ack": false,
+        "error": 1
+    }
+}

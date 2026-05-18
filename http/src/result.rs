@@ -1,158 +1,134 @@
-use std::{ffi::*, ptr::NonNull, slice};
+use std::{ffi::c_void, io::Write};
 
 use bstr::BStr;
 
-use crate::{Buffer, ConstBuffer};
+use crate::{IsSane, bio::Writer, buffer::Buffer, function};
 
+/// Invariants:
+/// This will always be received as a pointer to write information
+/// out of a function
+/// The function will always write either true or false out to
+/// is_ok
+///
+/// if is_ok == true, then the result is written to the value at the ok pointer
+///
+/// The ok pointer is some type determined by the function
+/// the pointer is being passed into. Look at the function
+/// documentation to figure out what kind of pointer is needed
+/// The ok pointer must always be convertible to a reference of
+/// the documented type.
+/// This will be documented as "x must be a result to a y" where
+/// x is the result variable and y is the type
+///
+/// If is_ok == false, then an error message was written out to
+/// err. The error is usually, but not guaranteed to be utf8 encoded
 #[repr(C)]
-pub struct Result {
-    size: usize,
-    str: Option<NonNull<u8>>,
+pub struct HttpResult {
+    pub is_ok: bool,
+    pub ok: *mut c_void,
+    pub err: Buffer,
 }
 
-// SAFETY:
-// str must point to a null-terminated str
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn http_res_new_err(str: *const c_char) -> Result {
-    // SAFETY: str points to a null-terminated str
-    let s = unsafe { CStr::from_ptr(str) };
-
-    let b = s.to_bytes().to_owned().into_boxed_slice();
-
-    let ptr = Box::into_raw(b);
-
-    // SAFETY: ptr just came from a box, it is safe to convert
-    // to a reference
-    let slice = unsafe { ptr.as_mut_unchecked() };
-
-    let ptr = slice.as_mut_ptr();
-    let len = slice.len();
-
-    Result {
-        size: len,
-        // SAFETY: ptr is from a slice, and therefore not null
-        str: Some(unsafe { NonNull::new_unchecked(ptr) }),
-    }
-}
-
-// SAFETY:
-// str must point to a null-terminated str
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn http_res_new_err_buf(str: ConstBuffer) -> Result {
-    let b = str.as_slice().to_owned().into_boxed_slice();
-    let ptr = Box::into_raw(b);
-
-    // SAFETY: ptr just came from a box, it is safe to convert
-    // to a reference
-    let slice = unsafe { ptr.as_mut_unchecked() };
-
-    let ptr = slice.as_mut_ptr();
-    let len = slice.len();
-
-    Result {
-        size: len,
-        // SAFETY: ptr is from a slice, and therefore not null
-        str: Some(unsafe { NonNull::new_unchecked(ptr) }),
-    }
-}
-
-pub fn result_from_string(str: String) -> Result {
-    let b = str.into_bytes().into_boxed_slice();
-
-    let ptr = Box::into_raw(b);
-
-    // SAFETY: ptr just came from a box, it is safe to convert
-    // to a reference
-    let slice = unsafe { ptr.as_mut_unchecked() };
-
-    let ptr = slice.as_mut_ptr();
-    let len = slice.len();
-
-    Result {
-        size: len,
-        // SAFETY: ptr is from a slice, and therefore not null
-        str: Some(unsafe { NonNull::new_unchecked(ptr) }),
-    }
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn http_res_new_ok(count: usize) -> Result {
-    Result {
-        size: count,
-        str: None,
-    }
-}
-
+/// Prints the result error message out to stdout
+/// Does not append a new line to the end of the message
+///
 /// SAFETY:
-/// res must be convertable to a reference
-/// res must not be used after this call
+///
+/// 1) res must be convertible to a reference
+/// 2) res must be an error
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn http_destroy_res(res: *mut Result) {
-    // SAFETY: res is convertable to a reference
-    let res = unsafe { res.as_mut_unchecked() };
+pub unsafe extern "C" fn http_print_err(res: *const HttpResult) {
+    let res = unsafe { res.as_ref_unchecked() };
 
-    if let Some(p) = res.str {
-        // SAFETY: If p exists, it was created from a slice of len bytes
-        let slice = unsafe { slice::from_raw_parts_mut(p.as_ptr(), res.size) };
+    assert!(!res.is_ok, "{}: Result is not an error", function!());
+    assert!(
+        res.err.is_sane(),
+        "{}: Result error is not convertible to a slice",
+        function!()
+    );
 
-        // SAFETY: slice pointer was created via into raw in the first place
-        drop(unsafe { Box::from_raw(slice) });
+    print!("{}", BStr::new(&res.err));
+}
+
+/// Writes the error message out to the given writer.
+/// If an error occurs during writing, then that is a
+/// fatal condition... I don't know what else to do...
+///
+/// SAFETY:
+///
+/// 1) res must be convertible to a reference
+/// 2) res must be an error
+/// 3) writer must be convertible to a reference
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn http_write_err(res: *const HttpResult, writer: *mut Writer) {
+    assert!(
+        res.is_sane(),
+        "{}: Result pointer is not convertible to a reference",
+        function!(),
+    );
+    assert!(
+        writer.is_sane(),
+        "{}: Writer pointer is not convertible to a reference",
+        function!(),
+    );
+
+    let res = unsafe { res.as_ref_unchecked() };
+    let writer = unsafe { writer.as_mut_unchecked() };
+
+    assert!(
+        !res.is_ok,
+        "{}: Result pointer is not an error",
+        function!()
+    );
+    assert!(
+        res.err.is_sane(),
+        "{}: Result error is not convertible to a slice",
+        function!()
+    );
+
+    let r = writer.write_all(&res.err);
+
+    // Kill the process, because I can't really think of a much
+    // better way to do this...
+    if r.is_err() {
+        eprintln!(
+            "{}: Failed to write to buffer: {}",
+            function!(),
+            r.unwrap_err()
+        );
+        std::process::exit(-1);
     }
-
-    res.size = 0;
-    res.str = None;
 }
 
 // SAFETY:
-// Res must be convertable to a reference
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn http_res_is_ok(res: *const Result) -> bool {
-    // SAFETY: Res is convertable to a reference
-    let res = unsafe { res.as_ref_unchecked() };
-    res.str.is_none()
+//
+// res must be a result to a T
+pub(crate) unsafe fn set_ok<T>(res: &mut HttpResult, val: T, func_name: &'static str) {
+    let ok = res.ok.cast::<T>();
+    assert!(
+        ok.is_sane(),
+        "{}: Result ok is not convertible to a reference to a {}",
+        func_name,
+        std::any::type_name::<T>(),
+    );
+
+    let v = unsafe { ok.as_mut_unchecked() };
+    *v = val;
+
+    res.is_ok = true;
+    res.err.clear();
 }
 
-// SAFETY:
-// Res must be convertable to a reference
-// Res must be the ok variant
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn http_res_get_count(res: *const Result) -> usize {
-    // SAFETY: Res is convertable to a reference
-    let res = unsafe { res.as_ref_unchecked() };
-
-    // If res is ok, then size is the number of bytes or written
-    res.size
+macro_rules! set_err {
+    ($res:ident) => {
+        compile_error!("Requires arguments for the error to write")
+    };
+    ($res:ident, $ret:expr, $($arg:tt)*) => {{
+        $res.is_ok = false;
+        $res.err.len = 0;
+        _ = ::std::fmt::Write::write_fmt(&mut $res.err, format_args!($($arg)*));
+        return $ret
+    }};
 }
 
-// SAFETY:
-// Res must be convertable to a reference
-// Res must be the err variant
-// err must be convertable to a reference
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn http_res_get_err(res: *const Result, err: *mut Buffer) -> c_int {
-    // SAFETY: res is convertable to a reference
-    let res = unsafe { res.as_ref_unchecked() };
-
-    // SAFETY: res is an err, so str exists
-    let ptr = unsafe { res.str.unwrap_unchecked() };
-
-    // SAFETY: res is an err, so the pointer is to a slice of res.size bytes
-    let data = unsafe { slice::from_raw_parts(ptr.as_ptr(), res.size) };
-
-    // SAFETY: err is convertable to a reference
-    let err = unsafe { err.as_mut_unchecked() };
-
-    err.copy_slice(data)
-}
-
-// SAFETY:
-// res must be the err variant
-pub unsafe fn http_res_err_as_bstr(res: &Result) -> &BStr {
-    // SAFETY: res is an err, so str exists
-    let ptr = unsafe { res.str.unwrap_unchecked() };
-
-    // SAFETY: res is an err, so the pointer is to a slice of res.size bytes
-    let data = unsafe { slice::from_raw_parts(ptr.as_ptr(), res.size) };
-
-    BStr::new(data)
-}
+pub(crate) use set_err;

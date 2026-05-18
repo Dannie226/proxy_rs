@@ -1,223 +1,153 @@
-use std::ffi::c_void;
-
 use bstr::BString;
 
-use crate::{
-    ConstBuffer,
-    bio::{Writer, http_bio_write, http_destroy_writer},
-    request::HeaderMap,
-    result::{http_res_is_ok, http_res_new_ok},
-};
+pub mod status_codes {
+    use std::ffi::c_char;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u16)]
-pub enum StatusCode {
-    Continue = 100,
-    SwitchingProtocols = 101,
-    Processing = 102,
-    EarlyHints = 103,
+    pub const CONTINUE: u16 = 100;
+    pub const SWITCHING_PROTOCOLS: u16 = 101;
+    pub const PROCESSING: u16 = 102;
+    pub const EARLY_HINTS: u16 = 103;
 
-    OK = 200,
-    Created = 201,
-    Accepted = 202,
-    NonAuthoritativeInformation = 203,
-    NoContent = 204,
-    ResetContent = 205,
-    PartialContent = 206,
+    pub const OK: u16 = 200;
+    pub const CREATED: u16 = 201;
+    pub const ACCEPTED: u16 = 202;
+    pub const NON_AUTHORITATIVE_INFORMATION: u16 = 203;
+    pub const NO_CONTENT: u16 = 204;
+    pub const RESET_CONTENT: u16 = 205;
+    pub const PARTIAL_CONTENT: u16 = 206;
 
-    MultipleChoices = 300,
-    MovedPermanently = 301,
-    Found = 302,
-    SeeOther = 303,
-    NotModified = 304,
-    TemporaryRedirect = 307,
-    PermanentRedirect = 308,
+    pub const MULTIPLE_CHOICES: u16 = 300;
+    pub const MOVED_PERMANENTLY: u16 = 301;
+    pub const FOUND: u16 = 302;
+    pub const SEE_OTHER: u16 = 303;
+    pub const NOT_MODIFIED: u16 = 304;
+    pub const TEMPORARY_REDIRECT: u16 = 307;
+    pub const PERMANENT_REDIRECT: u16 = 308;
 
-    BadRequest = 400,
-    Unauthorized = 401,
-    PaymentRequired = 402,
-    Forbidden = 403,
-    NotFound = 404,
-    MethodNotAllowed = 405,
-    NotAcceptable = 406,
-    ProxyAuthenticationRequired = 407,
-    RequestTimeout = 408,
-    Conflict = 409,
-    Gone = 410,
-    LengthRequired = 411,
-    PreconditionFailed = 412,
-    ContentTooLarge = 413,
-    URITooLong = 414,
-    UnsupportedMediaType = 415,
-    RangeNotSatisfiable = 416,
-    ExpectationFailed = 417,
-    ImATeapot = 418,
-    MisdirectedRequest = 421,
-    UpgradeRequired = 426,
-    PreconditionRequired = 428,
-    TooManyRequests = 429,
-    RequestHeaderFieldsTooLarge = 431,
-    UnavailableForLegalReasons = 451,
+    pub const BAD_REQUEST: u16 = 400;
+    pub const UNAUTHORIZED: u16 = 401;
+    pub const PAYMENT_REQUIRED: u16 = 402;
+    pub const FORBIDDEN: u16 = 403;
+    pub const NOT_FOUND: u16 = 404;
+    pub const METHOD_NOT_ALLOWED: u16 = 405;
+    pub const NOT_ACCEPTABLE: u16 = 406;
+    pub const PROXY_AUTHENTICATION_REQUIRED: u16 = 407;
+    pub const REQUEST_TIMEOUT: u16 = 408;
+    pub const CONFLICT: u16 = 409;
+    pub const GONE: u16 = 410;
+    pub const LENGTH_REQUIRED: u16 = 411;
+    pub const PRECONDITION_FAILED: u16 = 412;
+    pub const CONTENT_TOO_LARGE: u16 = 413;
+    pub const URITOO_LONG: u16 = 414;
+    pub const UNSUPPORTED_MEDIA_TYPE: u16 = 415;
+    pub const RANGE_NOT_SATISFIABLE: u16 = 416;
+    pub const EXPECTATION_FAILED: u16 = 417;
+    pub const IM_ATEAPOT: u16 = 418;
+    pub const MISDIRECTED_REQUEST: u16 = 421;
+    pub const UPGRADE_REQUIRED: u16 = 426;
+    pub const PRECONDITION_REQUIRED: u16 = 428;
+    pub const TOO_MANY_REQUESTS: u16 = 429;
+    pub const REQUEST_HEADER_FIELDS_TOO_LARGE: u16 = 431;
+    pub const UNAVAILABLE_FOR_LEGAL_REASONS: u16 = 451;
 
-    InternalServerError = 500,
-    NotImplemented = 501,
-    BadGateway = 502,
-    ServiceUnavailable = 503,
-    GatewayTimeout = 504,
-    HTTPVersionNotSupported = 505,
-    VariantAlsoNegotiates = 506,
-    NotExtended = 510,
-    NetworkAuthenticationRequired = 511,
-}
+    pub const INTERNAL_SERVER_ERROR: u16 = 500;
+    pub const NOT_IMPLEMENTED: u16 = 501;
+    pub const BAD_GATEWAY: u16 = 502;
+    pub const SERVICE_UNAVAILABLE: u16 = 503;
+    pub const GATEWAY_TIMEOUT: u16 = 504;
+    pub const HTTPVERSION_NOT_SUPPORTED: u16 = 505;
+    pub const VARIANT_ALSO_NEGOTIATES: u16 = 506;
+    pub const NOT_EXTENDED: u16 = 510;
+    pub const NETWORK_AUTHENTICATION_REQUIRED: u16 = 511;
 
-impl StatusCode {
-    pub fn get_reason_phrase(self) -> &'static str {
-        match self {
-            Self::Continue => "Continue",
-            Self::SwitchingProtocols => "Switching Protocols",
-            Self::Processing => "Processing",
-            Self::EarlyHints => "Early Hints",
+    #[unsafe(no_mangle)]
+    pub extern "C" fn get_reason_phrase(code: u16) -> *const c_char {
+        match code {
+            CONTINUE => c"Continue".as_ptr(),
+            SWITCHING_PROTOCOLS => c"Switching Protocols".as_ptr(),
+            PROCESSING => c"Processing".as_ptr(),
+            EARLY_HINTS => c"Early Hints".as_ptr(),
 
-            Self::OK => "OK",
-            Self::Created => "Created",
-            Self::Accepted => "Accepted",
-            Self::NonAuthoritativeInformation => "Non-Authoritative Information",
-            Self::NoContent => "No Content",
-            Self::ResetContent => "Reset Content",
-            Self::PartialContent => "Partial Content",
+            OK => c"OK".as_ptr(),
+            CREATED => c"Created".as_ptr(),
+            ACCEPTED => c"Accepted".as_ptr(),
+            NON_AUTHORITATIVE_INFORMATION => c"Non-Authoritative Information".as_ptr(),
+            NO_CONTENT => c"No Content".as_ptr(),
+            RESET_CONTENT => c"Reset Content".as_ptr(),
+            PARTIAL_CONTENT => c"Partial Content".as_ptr(),
 
-            Self::MultipleChoices => "Multiple Choices",
-            Self::MovedPermanently => "Moved Permanently",
-            Self::Found => "Found",
-            Self::SeeOther => "See Other",
-            Self::NotModified => "Not Modified",
-            Self::TemporaryRedirect => "Temporary Redirect",
-            Self::PermanentRedirect => "Permanent Redirect",
+            MULTIPLE_CHOICES => c"Multiple Choices".as_ptr(),
+            MOVED_PERMANENTLY => c"Moved Permanently".as_ptr(),
+            FOUND => c"Found".as_ptr(),
+            SEE_OTHER => c"See Other".as_ptr(),
+            NOT_MODIFIED => c"Not Modified".as_ptr(),
+            TEMPORARY_REDIRECT => c"Temporary Redirect".as_ptr(),
+            PERMANENT_REDIRECT => c"Permanent Redirect".as_ptr(),
 
-            Self::BadRequest => "Bad Request",
-            Self::Unauthorized => "Unauthorized",
-            Self::PaymentRequired => "Payment Required",
-            Self::Forbidden => "Forbidden",
-            Self::NotFound => "Not Found",
-            Self::MethodNotAllowed => "Method Not Allowed",
-            Self::NotAcceptable => "Not Acceptable",
-            Self::ProxyAuthenticationRequired => "Proxy Authentication Required",
-            Self::RequestTimeout => "Request Timeout",
-            Self::Conflict => "Conflict",
-            Self::Gone => "Gone",
-            Self::LengthRequired => "Length Required",
-            Self::PreconditionFailed => "Precondition Failed",
-            Self::ContentTooLarge => "Content Too Large",
-            Self::URITooLong => "URI Too Long",
-            Self::UnsupportedMediaType => "Unsupported Media Type",
-            Self::RangeNotSatisfiable => "Range Not Satisfiable",
-            Self::ExpectationFailed => "Expectation Failed",
-            Self::ImATeapot => "I'm A Teapot",
-            Self::MisdirectedRequest => "Misdirected Request",
-            Self::UpgradeRequired => "Upgrade Required",
-            Self::PreconditionRequired => "Precondition Required",
-            Self::TooManyRequests => "Too Many Requests",
-            Self::RequestHeaderFieldsTooLarge => "Request Header Fields Too Large",
-            Self::UnavailableForLegalReasons => "Unavailable For Legal Reasons",
+            BAD_REQUEST => c"Bad Request".as_ptr(),
+            UNAUTHORIZED => c"Unauthorized".as_ptr(),
+            PAYMENT_REQUIRED => c"Payment Required".as_ptr(),
+            FORBIDDEN => c"Forbidden".as_ptr(),
+            NOT_FOUND => c"Not Found".as_ptr(),
+            METHOD_NOT_ALLOWED => c"Method Not Allowed".as_ptr(),
+            NOT_ACCEPTABLE => c"Not Acceptable".as_ptr(),
+            PROXY_AUTHENTICATION_REQUIRED => c"Proxy Authentication Required".as_ptr(),
+            REQUEST_TIMEOUT => c"Request Timeout".as_ptr(),
+            CONFLICT => c"Conflict".as_ptr(),
+            GONE => c"Gone".as_ptr(),
+            LENGTH_REQUIRED => c"Length Required".as_ptr(),
+            PRECONDITION_FAILED => c"Precondition Failed".as_ptr(),
+            CONTENT_TOO_LARGE => c"Content Too Large".as_ptr(),
+            URITOO_LONG => c"URI Too Long".as_ptr(),
+            UNSUPPORTED_MEDIA_TYPE => c"Unsupported Media Type".as_ptr(),
+            RANGE_NOT_SATISFIABLE => c"Range Not Satisfiable".as_ptr(),
+            EXPECTATION_FAILED => c"Expectation Failed".as_ptr(),
+            IM_ATEAPOT => c"I'm A Teapot".as_ptr(),
+            MISDIRECTED_REQUEST => c"Misdirected Request".as_ptr(),
+            UPGRADE_REQUIRED => c"Upgrade Required".as_ptr(),
+            PRECONDITION_REQUIRED => c"Precondition Required".as_ptr(),
+            TOO_MANY_REQUESTS => c"Too Many Requests".as_ptr(),
+            REQUEST_HEADER_FIELDS_TOO_LARGE => c"Request Header Fields Too Large".as_ptr(),
+            UNAVAILABLE_FOR_LEGAL_REASONS => c"Unavailable For Legal Reasons".as_ptr(),
 
-            Self::InternalServerError => "Internal Server Error",
-            Self::NotImplemented => "Not Implemented",
-            Self::BadGateway => "Bad Gateway",
-            Self::ServiceUnavailable => "Service Unavailable",
-            Self::GatewayTimeout => "Gateway Timeout",
-            Self::HTTPVersionNotSupported => "HTTP Version Not Supported",
-            Self::VariantAlsoNegotiates => "Variant Also Negotiates",
-            Self::NotExtended => "Not Extended",
-            Self::NetworkAuthenticationRequired => "Network Authentication Required",
+            INTERNAL_SERVER_ERROR => c"Internal Server Error".as_ptr(),
+            NOT_IMPLEMENTED => c"Not Implemented".as_ptr(),
+            BAD_GATEWAY => c"Bad Gateway".as_ptr(),
+            SERVICE_UNAVAILABLE => c"Service Unavailable".as_ptr(),
+            GATEWAY_TIMEOUT => c"Gateway Timeout".as_ptr(),
+            HTTPVERSION_NOT_SUPPORTED => c"HTTP Version Not Supported".as_ptr(),
+            VARIANT_ALSO_NEGOTIATES => c"Variant Also Negotiates".as_ptr(),
+            NOT_EXTENDED => c"Not Extended".as_ptr(),
+            NETWORK_AUTHENTICATION_REQUIRED => c"Network Authentication Required".as_ptr(),
+            _ => c"".as_ptr(),
         }
     }
 }
 
-impl TryFrom<u16> for StatusCode {
-    type Error = ();
+pub use status_codes::*;
 
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
-        Ok(match value {
-            100 => Self::Continue,
-            101 => Self::SwitchingProtocols,
-            102 => Self::Processing,
-            103 => Self::EarlyHints,
-
-            200 => Self::OK,
-            201 => Self::Created,
-            202 => Self::Accepted,
-            203 => Self::NonAuthoritativeInformation,
-            204 => Self::NoContent,
-            205 => Self::ResetContent,
-            206 => Self::PartialContent,
-
-            300 => Self::MultipleChoices,
-            301 => Self::MovedPermanently,
-            302 => Self::Found,
-            303 => Self::SeeOther,
-            304 => Self::NotModified,
-            307 => Self::TemporaryRedirect,
-            308 => Self::PermanentRedirect,
-
-            400 => Self::BadRequest,
-            401 => Self::Unauthorized,
-            402 => Self::PaymentRequired,
-            403 => Self::Forbidden,
-            404 => Self::NotFound,
-            405 => Self::MethodNotAllowed,
-            406 => Self::NotAcceptable,
-            407 => Self::ProxyAuthenticationRequired,
-            408 => Self::RequestTimeout,
-            409 => Self::Conflict,
-            410 => Self::Gone,
-            411 => Self::LengthRequired,
-            412 => Self::PreconditionFailed,
-            413 => Self::ContentTooLarge,
-            414 => Self::URITooLong,
-            415 => Self::UnsupportedMediaType,
-            416 => Self::RangeNotSatisfiable,
-            417 => Self::ExpectationFailed,
-            418 => Self::ImATeapot,
-            421 => Self::MisdirectedRequest,
-            426 => Self::UpgradeRequired,
-            428 => Self::PreconditionRequired,
-            429 => Self::TooManyRequests,
-            431 => Self::RequestHeaderFieldsTooLarge,
-            451 => Self::UnavailableForLegalReasons,
-
-            500 => Self::InternalServerError,
-            501 => Self::NotImplemented,
-            502 => Self::BadGateway,
-            503 => Self::ServiceUnavailable,
-            504 => Self::GatewayTimeout,
-            505 => Self::HTTPVersionNotSupported,
-            506 => Self::VariantAlsoNegotiates,
-            510 => Self::NotExtended,
-            511 => Self::NetworkAuthenticationRequired,
-            _ => return Err(()),
-        })
-    }
-}
+use crate::{
+    HeaderMap, IsSane,
+    bio::{Writer, http_bio_write, http_destroy_writer},
+    buffer::ConstBuffer,
+    function,
+    result::{HttpResult, set_ok},
+};
 
 /// SAFETY:
-/// 1) Writer must be convertable to a reference
-/// 2) res must be convertable to a reference
-pub type StatusFn = unsafe extern "C" fn(
-    writer: *mut ResponseWriter,
-    code: StatusCode,
-    res: *mut crate::result::Result,
-);
+/// 1) writer must be convertible to a reference
+/// 2) res must be convertible to a reference
+/// 3) res must be a result to a usize
+pub type StatusFn =
+    unsafe extern "C" fn(writer: *mut ResponseWriter, code: u16, res: *mut HttpResult);
 
 /// Caller must ensure the following:
-/// 1) Writer is convertable to a reference
-/// 2) Data is convertable to a slice of len bytes
-/// 3) Written is convertable to a reference
-pub type WriteFn = unsafe extern "C" fn(
-    writer: *mut Writer,
-    data: *const c_void,
-    len: usize,
-    written: *mut crate::result::Result,
-);
+/// 1) writer is convertible to a reference
+/// 2) data is convertible to a slice of len bytes
+/// 3) res is convertible to a reference
+/// 4) res must be a result to a usize
+pub type WriteFn =
+    unsafe extern "C" fn(writer: *mut Writer, data: *const u8, len: usize, res: *mut HttpResult);
 
 pub struct ResponseWriter {
     pub(crate) writer: *mut Writer,
@@ -228,7 +158,7 @@ pub struct ResponseWriter {
 }
 
 /// SAFETY:
-/// 1) Writer must have been created from http_new_writer function
+/// 1) writer must have been created from http_new_writer function
 /// 2) WriteFn's safety requirements
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn http_new_response_writer(
@@ -239,7 +169,7 @@ pub unsafe extern "C" fn http_new_response_writer(
 }
 
 /// SAFETY:
-/// 1) Writer must have been created from http_new_writer function
+/// 1) writer must have been created from http_new_writer function
 /// 2) WriteFn's safety requirements
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn http_custom_response_writer(
@@ -247,6 +177,12 @@ pub unsafe extern "C" fn http_custom_response_writer(
     status_fn: StatusFn,
     write_fn: WriteFn,
 ) -> *mut ResponseWriter {
+    assert!(
+        writer.is_sane(),
+        "{}: Writer is not convertible to a reference",
+        function!()
+    );
+
     let w = Box::new(ResponseWriter {
         writer,
         headers: HeaderMap::new(),
@@ -259,98 +195,163 @@ pub unsafe extern "C" fn http_custom_response_writer(
 }
 
 /// Caller must ensure the following:
-/// 1) Writer is convertable to a reference
-/// 2) Data is convertable to a slice of len bytes
-/// 3) res is convertable to a reference
+/// 1) writer is convertible to a reference
+/// 2) data is convertible to a slice of len bytes
+/// 3) res is convertible to a reference
+/// 4) res must be a result to a usize
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn http_write(
     writer: *mut ResponseWriter,
     data: *const u8,
     len: usize,
-    res: *mut crate::result::Result,
+    res: *mut HttpResult,
 ) {
-    // SAFETY: Writer is convertable to a reference
+    assert!(
+        writer.is_sane(),
+        "{}: Writer is not convertible to a reference",
+        function!()
+    );
+    assert!(
+        data.is_sane(),
+        "{}: Data is not convertible to a slice",
+        function!()
+    );
+    assert!(
+        res.is_sane(),
+        "{}: Result is not convertible to a reference",
+        function!()
+    );
+
+    // SAFETY: Writer is convertible to a reference
     let writer = unsafe { writer.as_mut_unchecked() };
+
+    // SAFETY: written is convertible to a reference
+    let res = unsafe { res.as_mut_unchecked() };
+    assert!(
+        res.err.is_sane(),
+        "{}: Result error is not convertible to a slice",
+        function!()
+    );
 
     if !writer.written {
         // SAFETY:
-        // Writer is convertable to a reference, and status code is obviously a status code
-        // Written is convertable to a reference
-        unsafe { http_write_status(writer, StatusCode::OK, res) };
+        // Writer is convertible to a reference, and status code is obviously a status code
+        // Written is convertible to a reference
+        unsafe { http_write_status(writer, OK, res) };
 
-        // SAFETY:
-        // res is convertable to a reference
-        if !unsafe { http_res_is_ok(res) } {
+        if !res.is_ok {
             return;
         }
     }
 
-    // SAFETY: written is convertable to a reference
-    let written = unsafe { res.as_mut_unchecked() };
-
-    unsafe { (writer.write_fn)(writer.writer, data.cast(), len, written) }
+    unsafe { (writer.write_fn)(writer.writer, data.cast(), len, res) }
 }
 
 /// Caller must ensure the following:
-/// 1) Writer is convertable to a reference
+/// 1) Writer is convertible to a reference
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn http_add_header(
     writer: *mut ResponseWriter,
     name: ConstBuffer,
     value: ConstBuffer,
 ) {
-    // SAFETY: Writer is convertable to a reference
+    assert!(
+        writer.is_sane(),
+        "{}: Writer is not convertible to a reference",
+        function!()
+    );
+    assert!(
+        name.is_sane(),
+        "{}: Name is not convertible to a slice",
+        function!()
+    );
+    assert!(
+        value.is_sane(),
+        "{}: Value is not convertible to a slice",
+        function!()
+    );
+
+    // SAFETY: Writer is convertible to a reference
     let writer = unsafe { writer.as_mut_unchecked() };
 
-    // SAFETY: header_name is convertable to a slice of name_len bytes
-    let header_name = name.as_slice();
+    if name.is_empty() {
+        return;
+    }
 
-    // SAFETY: header_value is convertable to a slice of value_len bytes
-    let header_value = value.as_slice();
-
-    let mut header_name = BString::from(header_name);
-    header_name.make_ascii_lowercase();
+    let mut name = BString::from(&*name);
+    name.make_ascii_lowercase();
 
     let headers = &mut writer.headers;
 
-    headers
-        .entry(header_name)
-        .or_insert(Vec::new())
-        .push(BString::from(header_value));
+    if !headers.contains_key(&name) || !value.is_empty() {
+        headers
+            .entry(name)
+            .or_insert_with(|| Vec::with_capacity(4))
+            .push(BString::from(&*value));
+    }
 }
 
 /// Caller must ensure the following:
-/// 1) Writer is convertable to a reference
+/// 1) writer is convertible to a reference
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn http_remove_header(writer: *mut ResponseWriter, header: ConstBuffer) {
-    // SAFETY: Writer is convertable to a reference
-    let writer = unsafe { writer.as_mut_unchecked() };
+    assert!(
+        writer.is_sane(),
+        "{}: Writer is not convertible to a reference",
+        function!()
+    );
+    assert!(
+        header.is_sane(),
+        "{}: Header is not convertible to a slice",
+        function!()
+    );
 
-    let header = header.as_slice();
+    // SAFETY: Writer is convertible to a reference
+    let writer = unsafe { writer.as_mut_unchecked() };
 
     let headers = &mut writer.headers;
 
-    headers.remove(header);
+    headers.remove(&*header);
 }
 
 /// Caller must ensure the following:
-/// 1) Writer is convertable to a reference
-/// 2) status must be a valid status code (technically, you may put any u16 in here)
-/// 3) res must be convertable to a reference
+/// 1) writer is convertible to a reference
+/// 2) status must be a valid status code (technically, you can put any u16 in here)
+/// 3) res must be convertible to a reference
+/// 4) res must be a result to a usize
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn http_write_status(
     writer: *mut ResponseWriter,
-    status: StatusCode,
-    res: *mut crate::result::Result,
+    status: u16,
+    res: *mut HttpResult,
 ) {
-    // SAFETY: Writer is convertable to a reference
+    assert!(
+        writer.is_sane(),
+        "{}: Writer is not convertible to a reference",
+        function!()
+    );
+    assert!(
+        res.is_sane(),
+        "{}: Result is not convertible to a reference",
+        function!()
+    );
+
+    // SAFETY: Writer is convertible to a reference
     let writer = unsafe { writer.as_mut_unchecked() };
 
-    // SAFETY: res is convertable to a reference
+    // SAFETY: res is convertible to a reference
     let res = unsafe { res.as_mut_unchecked() };
+    assert!(
+        res.err.is_sane(),
+        "{}: Result error is not convertible to a slice",
+        function!()
+    );
 
     if writer.written {
-        *res = http_res_new_ok(0);
+        unsafe {
+            set_ok(res, 0usize, function!());
+        };
+        return;
     }
 
     // SAFETY:
@@ -358,8 +359,7 @@ pub unsafe extern "C" fn http_write_status(
     // res can be converted to a reference
     unsafe { (writer.status_fn)(writer, status, res) };
 
-    // SAFETY: res is convertable to a reference
-    if !unsafe { http_res_is_ok(res) } {
+    if !res.is_ok {
         return;
     }
 
@@ -371,6 +371,12 @@ pub unsafe extern "C" fn http_write_status(
 /// Writer must not be used after call to this function
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn http_destroy_response_writer(writer: *mut ResponseWriter) {
+    assert!(
+        writer.is_sane(),
+        "{}: Writer is not convertible to a reference",
+        function!()
+    );
+
     // SAFETY: Writer was created from http_new_response_writer, so the pointer
     // is from Box::into_raw
     let w = unsafe { Box::from_raw(writer) };

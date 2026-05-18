@@ -1,0 +1,16 @@
+{
+    "name": "Invalid Frame Size Large",
+    "wire": "000006040000000000000500003FFF",
+    "expected": {
+        "settings": [
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+        ],
+        "ack": false,
+        "error": 1
+    }
+}

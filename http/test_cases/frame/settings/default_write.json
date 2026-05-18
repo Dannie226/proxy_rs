@@ -1,0 +1,16 @@
+{
+    "name": "Default Write",
+    "wire": "000000040000000000",
+    "expected": {
+        "settings": [
+            4096,
+            1,
+            null,
+            65535,
+            16384,
+            null
+        ],
+        "ack": false,
+        "error": null
+    }
+}

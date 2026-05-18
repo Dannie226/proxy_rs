@@ -1,0 +1,10 @@
+{
+    "name": "Invalid Padding",
+    "wire": "00000500090000000108000000",
+    "pad": null,
+    "expected": {
+        "is_end": false,
+        "data": "",
+        "error": 1
+    }
+}

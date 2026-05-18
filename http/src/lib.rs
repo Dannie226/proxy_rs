@@ -1,4 +1,5 @@
 pub mod bio;
+pub mod buffer;
 pub mod http11;
 pub mod http2;
 pub mod request;
@@ -9,126 +10,118 @@ pub use request::HeaderMap;
 pub use request::Request;
 pub use response::ResponseWriter;
 
-use core::slice;
-use std::ffi::c_int;
-use std::io;
-use std::marker::PhantomData;
-use std::ptr;
-use thiserror::Error;
-
-/// Repr C struct for holding a mutable slice
-/// Just nicer to pass this around as opposed to
-/// pointer/len pairs
-/// Invariants:
-/// Data is either null, or convertable to a slice of len bytes
-#[repr(C)]
-pub struct Buffer<'a> {
-    pub len: usize,
-    pub data: *mut u8,
-    _marker: PhantomData<&'a [u8]>,
+/// Trait for determining if a value is sane
+/// Not necessarily that it is valid for conversions,
+/// just that it is a sane value
+///
+/// For pointers, it is checking nullity and alignment
+/// For other values, it is just a preliminary sanity check
+/// to ensure you aren't doing anything obviously wrong
+pub(crate) trait IsSane {
+    fn is_sane(&self) -> bool;
 }
 
-impl<'a> Buffer<'a> {
-    pub fn from(buf: &'a mut [u8]) -> Buffer<'a> {
-        Buffer {
-            len: buf.len(),
-            data: buf.as_mut_ptr(),
-            _marker: PhantomData,
-        }
-    }
-
-    // SAFETY:
-    // Data is either null or convertable to a slice of len bytes
-    pub unsafe fn from_raw(data: *mut u8, len: usize) -> Buffer<'a> {
-        Buffer {
-            len,
-            data,
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn empty() -> Buffer<'a> {
-        Buffer {
-            len: 0,
-            data: ptr::null_mut(),
-            _marker: PhantomData,
-        }
-    }
-
-    pub fn as_slice(&self) -> Option<&'a mut [u8]> {
-        if !self.data.is_null() {
-            // SAFETY:
-            // Data is convertable to a slice of len bytes because
-            // data isn't null
-            Some(unsafe { slice::from_raw_parts_mut(self.data, self.len) })
-        } else {
-            None
-        }
-    }
-
-    pub fn copy_slice(&mut self, src: &[u8]) -> c_int {
-        let Some(buf) = self.as_slice() else {
-            self.len = src.len();
-            return 1;
-        };
-
-        if buf.len() < src.len() {
-            return 2;
-        }
-
-        buf[..src.len()].copy_from_slice(src);
-        self.len = src.len();
-        0
+impl<T> IsSane for *const T {
+    fn is_sane(&self) -> bool {
+        !self.is_null() && self.is_aligned()
     }
 }
 
-/// Repr C struct for holding an immuatable slice
-/// Just nicer to pass this around as opposed to
-/// pointer/len pairs
-/// Invariants:
-/// Data is convertable to a slice of len bytes
-#[derive(Clone, Copy)]
-#[repr(C)]
-pub struct ConstBuffer<'a> {
-    pub len: usize,
-    pub data: *const u8,
-    _marker: PhantomData<&'a [u8]>,
+impl<T> IsSane for *mut T {
+    fn is_sane(&self) -> bool {
+        <*const T as IsSane>::is_sane(&self.cast_const())
+    }
 }
 
-impl<'a> ConstBuffer<'a> {
-    pub fn from(buf: &'a [u8]) -> ConstBuffer<'a> {
-        ConstBuffer {
-            len: buf.len(),
-            data: buf.as_ptr(),
-            _marker: PhantomData,
+pub(crate) fn is_nonoverlapping(
+    dst: *const u8,
+    dst_len: usize,
+    src: *const u8,
+    src_len: usize,
+) -> bool {
+    return dst.addr().saturating_add(dst_len) <= src.addr()
+        || src.addr().saturating_add(src_len) <= dst.addr();
+}
+
+#[cfg(test)]
+pub mod test_utils {
+    use std::cell::Cell;
+
+    use crate::buffer::{Allocator, internal_alloc, internal_free};
+
+    pub(crate) fn parse_hex(data: &str) -> Option<Box<[u8]>> {
+        if data.len() % 2 != 0 {
+            println!("Len not multiple of two");
+            return None;
+        }
+
+        let mut b = vec![0u8; data.len() / 2].into_boxed_slice();
+
+        for i in 0..data.len() / 2 {
+            b[i] = u8::from_str_radix(&data[i * 2..i * 2 + 2], 16)
+                .inspect_err(|e| println!("{e}"))
+                .ok()?;
+        }
+
+        Some(b)
+    }
+
+    pub(crate) fn to_hex(data: &[u8]) -> String {
+        use std::fmt::Write;
+
+        let mut s = String::with_capacity(data.len() * 2);
+
+        for &d in data {
+            _ = write!(s, "{d:02x}");
+        }
+
+        s
+    }
+
+    thread_local! {
+        static ALLOCED: Cell<usize> = Cell::new(0);
+        static FREED: Cell<usize> = Cell::new(0);
+    }
+
+    extern "C" fn test_alloc(len: usize) -> *mut u8 {
+        ALLOCED.set(ALLOCED.get() + len);
+        internal_alloc(len)
+    }
+
+    extern "C" fn test_free(ptr: *mut u8, len: usize) {
+        FREED.set(FREED.get() + len);
+        unsafe { internal_free(ptr, len) };
+    }
+
+    pub(crate) fn new_test_allocator() -> Allocator {
+        Allocator {
+            alloc: test_alloc,
+            free: test_free,
         }
     }
 
-    // SAFETY:
-    // Data must be convertable to a slice of len bytes
-    pub unsafe fn from_raw(data: *const u8, len: usize) -> ConstBuffer<'a> {
-        ConstBuffer {
-            len,
-            data,
-            _marker: PhantomData,
+    pub(crate) fn finish_test() {
+        let a = ALLOCED.take();
+        let f = FREED.take();
+
+        assert_eq!(a, f);
+    }
+}
+
+macro_rules! function {
+    () => {{
+        fn f() {}
+        fn type_name_of<T>(_: T) -> &'static str {
+            std::any::type_name::<T>()
         }
-    }
+        let name = type_name_of(f);
 
-    pub fn as_slice(&self) -> &'a [u8] {
-        // SAFETY:
-        // Data is convertable to a slice of len bytes
-        // data isn't null
-        unsafe { slice::from_raw_parts(self.data, self.len) }
-    }
+        // Find and cut the rest of the path
+        match &name[..name.len() - 3].rfind(':') {
+            Some(pos) => &name[pos + 1..name.len() - 3],
+            None => &name[..name.len() - 3],
+        }
+    }};
 }
 
-#[derive(Debug, Error)]
-pub enum ProtocolError {
-    #[error("Failed to read data: {0}")]
-    IO(#[from] io::Error),
-
-    #[error("Protocol error occurred: {0}")]
-    Protocol(u32),
-}
-
-pub type Result<T> = std::result::Result<T, ProtocolError>;
+pub(crate) use function;

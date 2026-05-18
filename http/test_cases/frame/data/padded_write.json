@@ -1,0 +1,10 @@
+{
+    "name": "Padded Write",
+    "wire": "00002200090000000109f56d138c9048253c51bd51a9d84f971098f354502a153b76000000000000000000",
+    "pad": 9,
+    "expected": {
+        "is_end": true,
+        "data": "f56d138c9048253c51bd51a9d84f971098f354502a153b76",
+        "error": null
+    }
+}
